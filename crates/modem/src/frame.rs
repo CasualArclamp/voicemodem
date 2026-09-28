@@ -21,11 +21,13 @@
 //! of the preamble is known, and the receiver trains its equaliser on all
 //! 300 of them by least squares.
 //!
-//! The payload is coherent. Every slot starts with sixteen pilots, +-1 from a
-//! long pseudo-random sequence so no two nearby slots share them; the
-//! receiver finds each slot's pilots, which says whether the symbols have
-//! slipped (a jitter buffer adding or dropping 20 ms moves everything after
-//! it by 48 symbols) and which way round the constellation is.
+//! The payload is coherent. Every slot starts with sixteen pilots, a long
+//! pseudo-random sequence so no two nearby slots share them, sent on a point
+//! of the payload's constellation and its opposite: +-1, or +-(1 + j)/sqrt 2
+//! for QPSK, whose points are on the diagonals. The receiver finds each
+//! slot's pilots, which says whether the symbols have slipped (a jitter
+//! buffer adding or dropping 20 ms moves everything after it by 48 symbols)
+//! and which way round the constellation is.
 
 use std::sync::OnceLock;
 
@@ -214,9 +216,10 @@ pub fn preamble(header: Header) -> Vec<Complex> {
     symbols
 }
 
-/// The pilots of slot `slot`: sixteen chips of the m-sequence of
+/// The pilots of slot `slot` as chips of +-1: sixteen of the m-sequence of
 /// x^11 + x^9 + 1, taken in turn, so that no two slots of a burst have the
-/// same pilots and a slip of a whole slot cannot pass for none.
+/// same pilots and a slip of a whole slot cannot pass for none. They go out
+/// as [`pilot_symbols`].
 pub fn pilots(slot: usize) -> [f64; PILOT] {
     static SEQUENCE: OnceLock<Vec<f64>> = OnceLock::new();
     let sequence = SEQUENCE.get_or_init(|| {
@@ -381,19 +384,21 @@ impl Geometry {
     }
 }
 
-/// The pilots of slot `slot` as symbols.
-pub fn pilot_symbols(slot: usize) -> impl Iterator<Item = Complex> {
-    pilots(slot).into_iter().map(|p| Complex::new(p, 0.0))
+/// The pilots of slot `slot` as symbols, on `modulation`'s pilot point and
+/// its opposite.
+pub fn pilot_symbols(modulation: Modulation, slot: usize) -> impl Iterator<Item = Complex> {
+    let point = modulation.pilot();
+    pilots(slot).into_iter().map(move |p| point.scale(p))
 }
 
 /// A codeword's symbols as they go out: each of its slots' pilots and then
-/// its share of `data`, a whole number of slots' worth, the first slot
-/// numbered `first_slot` in the burst.
-pub fn codeword_slots(first_slot: usize, data: &[Complex]) -> Vec<Complex> {
+/// its share of `data`, a whole number of slots' worth of `modulation`, the
+/// first slot numbered `first_slot` in the burst.
+pub fn codeword_slots(modulation: Modulation, first_slot: usize, data: &[Complex]) -> Vec<Complex> {
     assert!(!data.is_empty() && data.len().is_multiple_of(DATA), "{} data symbols is not whole slots", data.len());
     let mut symbols = Vec::with_capacity(data.len() / DATA * (PILOT + DATA));
     for (i, chunk) in data.chunks(DATA).enumerate() {
-        symbols.extend(pilot_symbols(first_slot + i));
+        symbols.extend(pilot_symbols(modulation, first_slot + i));
         symbols.extend_from_slice(chunk);
     }
     symbols
@@ -406,10 +411,10 @@ pub fn burst(header: Header, codewords: &[Vec<Complex>]) -> Vec<Complex> {
     let mut symbols = preamble(header);
     let mut slot = 0;
     for codeword in codewords {
-        symbols.extend(codeword_slots(slot, codeword));
+        symbols.extend(codeword_slots(header.modulation, slot, codeword));
         slot += codeword.len() / DATA;
     }
-    symbols.extend(pilot_symbols(slot));
+    symbols.extend(pilot_symbols(header.modulation, slot));
     symbols
 }
 
@@ -508,6 +513,19 @@ mod tests {
         assert_eq!(payload(Modulation::Bpsk, Rate::Half), 49);
         assert_eq!(payload(Modulation::Qpsk, Rate::Half), 105);
         assert_eq!(payload(Modulation::Psk8, Rate::ThreeQuarters), 245);
+    }
+
+    #[test]
+    fn every_symbol_after_the_preamble_is_a_point_of_the_constellation() {
+        for modulation in Modulation::ALL {
+            let h = Header { modulation, codewords: 2, total: 2, sequence: 0, ..header() };
+            let g = h.geometry();
+            let cws = vec![g.encode(0, &[1, 2, 3]), g.encode(1, &[4, 5, 6])];
+            let points = modulation.constellation();
+            for (i, z) in burst(h, &cws).iter().enumerate().skip(PREAMBLE) {
+                assert!(points.iter().any(|p| (*p - *z).abs() < 1e-12), "{} symbol {i} is {z:?}", modulation.label());
+            }
+        }
     }
 
     #[test]

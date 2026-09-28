@@ -160,15 +160,18 @@ codec sounds better.
   equaliser, and finds itself again after a fade from the stored samples.
 - **Framing.** Sixteen known pilots every 128 symbols say whether the stream
   has moved by whole symbols (a network jitter buffer's 20 ms slip) and which
-  way round the constellation is after a fade. Data between two pilots that
-  disagree is erased rather than trusted.
+  way round the constellation is after a fade. They go out on a point of the
+  payload's constellation and its opposite, so the receiver slices them with
+  the data. Data between two pilots that disagree is erased rather than
+  trusted.
 - **Codewords.** Eight slots (896 data symbols) per codeword. Each has a
   whitener, a K=7 convolutional code punctured to 1/2, 2/3 or 3/4, an
-  interleaver across the whole codeword, and Gray-mapped PSK. A voice codeword
-  carries whole codec frames, a frame count, a sequence number, an end flag,
-  one text character and a CRC-16. Each codeword holds a little more speech
-  than its own air time, which pays back the periodic preambles; that is how a
-  late listener gets in.
+  interleaver across the whole codeword, and Gray-mapped PSK: BPSK on ±1,
+  QPSK on the diagonals (45°, 135°, 225°, 315°), and 8PSK every 45° from +1.
+  A voice codeword carries whole codec frames, a frame count, a sequence
+  number, an end flag, one text character and a CRC-16. Each codeword holds
+  a little more speech than its own air time, which pays back the periodic
+  preambles; that is how a late listener gets in.
 
 ## Command line
 

@@ -265,9 +265,13 @@ impl Framer {
         } else {
             (expected, here, here_quality, here_quality >= FOUND)
         };
-        let points = self.geometry.modulation.points();
+        let modulation = self.geometry.modulation;
+        let points = modulation.points();
         let rotation = if found {
-            ((c.arg() / TAU * points as f64).round() as i64).rem_euclid(points as i64) as usize
+            // The chips went out on the pilot point, which for QPSK is off
+            // the real axis; the turn is what is left once its angle is out.
+            let turn = (c * modulation.pilot().conj()).arg();
+            ((turn / TAU * points as f64).round() as i64).rem_euclid(points as i64) as usize
         } else {
             self.pilots.last().map_or(0, |p| p.rotation)
         };
@@ -287,10 +291,11 @@ impl Framer {
             // The pilots' own error, which is the noise the soft values need.
             if before.found {
                 let chips = pilots(slot);
+                let pilot = modulation.pilot();
                 let error: f64 = chips
                     .iter()
                     .enumerate()
-                    .map(|(j, &p)| (self.point((slot * SLOT) as i64 + before.shift + j as i64) * spin - Complex::new(p, 0.0)).norm_sqr())
+                    .map(|(j, &p)| (self.point((slot * SLOT) as i64 + before.shift + j as i64) * spin - pilot.scale(p)).norm_sqr())
                     .sum::<f64>()
                     / PILOT as f64;
                 self.noise += 0.2 * (error.clamp(1e-4, 2.0) - self.noise);
@@ -404,11 +409,15 @@ mod tests {
 
     #[test]
     fn a_turned_constellation_is_turned_back() {
-        let (g, symbols, _) = sent(Modulation::Psk8, 2);
-        let turn = Complex::from_polar(1.0, 3.0 * TAU / 8.0);
-        let turned: Vec<Complex> = symbols.iter().map(|z| *z * turn).collect();
-        let mut framer = Framer::new(g.clone(), 2, 0.01, GIVE_UP_DATA);
-        assert_eq!(decoded(&g, &run(&mut framer, &turned)), vec![Some(0), Some(1)]);
+        for (m, steps) in [(Modulation::Bpsk, 1), (Modulation::Qpsk, 1), (Modulation::Qpsk, 3), (Modulation::Psk8, 3)] {
+            let (g, symbols, _) = sent(m, 2);
+            let turn = Complex::from_polar(1.0, TAU * steps as f64 / m.points() as f64);
+            let turned: Vec<Complex> = symbols.iter().map(|z| *z * turn).collect();
+            let mut framer = Framer::new(g.clone(), 2, 0.01, GIVE_UP_DATA);
+            let events = run(&mut framer, &turned);
+            assert_eq!(framer.pilots()[0].rotation, steps, "{} turned {steps}", m.label());
+            assert_eq!(decoded(&g, &events), vec![Some(0), Some(1)], "{} turned {steps}", m.label());
+        }
     }
 
     #[test]

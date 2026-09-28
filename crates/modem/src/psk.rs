@@ -1,15 +1,21 @@
 //! The three payload constellations, their Gray labels and their soft
 //! demapping.
 //!
-//! Every constellation has its points at `2 pi k / M` for `k` from nought, so
-//! all three contain +1 and -1. That is deliberate: the preamble and the
-//! pilots are sent as +-1 whatever the payload is, and so are always points
-//! of the constellation the receiver is slicing against. A pilot off the
-//! constellation would read to the receiver as an error the size of the
-//! distance to the nearest point, sixteen symbols in a row, every slot, and
-//! BinModem's core would call that a lost signal.
+//! BPSK and 8PSK have their points at `2 pi k / M` from +1. QPSK has its
+//! points on the diagonals, at 45, 135, 225 and 315 degrees: the way the
+//! textbooks, DVB-S and V.34's inner four draw it, with the axes as its
+//! decision lines.
+//!
+//! The pilots go out on the constellation's first point and its opposite
+//! ([`Modulation::pilot`]): +-1, or for QPSK +-(1 + j)/sqrt 2. They have to
+//! be points of the constellation the receiver is slicing against, since it
+//! slices them with the data. A pilot off the constellation would read to it
+//! as an error the size of the distance to the nearest point, sixteen symbols
+//! in a row, every slot, and BinModem's core would call that a lost signal.
+//! The preamble is +-1 whatever follows it; the receiver trains on it as
+//! known symbols, and slices nothing until it is over.
 
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_4, TAU};
 
 use dsp::Complex;
 use dsp::qam::{Constellation, Slicer};
@@ -70,9 +76,24 @@ impl Modulation {
         }
     }
 
-    /// Point `k`, at angle `2 pi k / M`.
+    /// The angle of point nought: 45 degrees for QPSK, on the diagonal, and
+    /// nought, on +1, for the others.
+    pub fn offset(self) -> f64 {
+        match self {
+            Modulation::Qpsk => FRAC_PI_4,
+            Modulation::Bpsk | Modulation::Psk8 => 0.0,
+        }
+    }
+
+    /// Point `k`, at angle `offset + 2 pi k / M`.
     pub fn point(self, k: usize) -> Complex {
-        Complex::from_polar(1.0, TAU * k as f64 / self.points() as f64)
+        Complex::from_polar(1.0, self.offset() + TAU * k as f64 / self.points() as f64)
+    }
+
+    /// The point a pilot chip of +1 goes out as. A chip of -1 goes out as its
+    /// opposite, which is a point too, `M` being even.
+    pub fn pilot(self) -> Complex {
+        self.point(0)
     }
 
     /// The points in angle order.
@@ -96,7 +117,7 @@ impl Modulation {
     /// The point index a received value lies nearest to.
     pub fn nearest(self, z: Complex) -> usize {
         let m = self.points() as f64;
-        ((z.arg() / TAU * m).round().rem_euclid(m)) as usize % self.points()
+        (((z.arg() - self.offset()) / TAU * m).round().rem_euclid(m)) as usize % self.points()
     }
 
     /// Max-log soft values for each of a symbol's bits, most significant
@@ -154,13 +175,23 @@ mod tests {
     }
 
     #[test]
-    fn every_constellation_holds_plus_and_minus_one() {
+    fn every_constellation_holds_its_pilots() {
         for m in Modulation::ALL {
             let points = m.constellation();
-            for target in [Complex::ONE, Complex::new(-1.0, 0.0)] {
+            for target in [m.pilot(), -m.pilot()] {
                 assert!(points.iter().any(|p| (*p - target).abs() < 1e-12), "{} lacks {target:?}", m.label());
             }
         }
+    }
+
+    #[test]
+    fn qpsk_is_on_the_diagonals_and_the_others_on_plus_one() {
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        for (k, (re, im)) in [(h, h), (-h, h), (-h, -h), (h, -h)].into_iter().enumerate() {
+            assert!((Modulation::Qpsk.point(k) - Complex::new(re, im)).abs() < 1e-12, "QPSK point {k}");
+        }
+        assert!((Modulation::Bpsk.pilot() - Complex::ONE).abs() < 1e-12);
+        assert!((Modulation::Psk8.pilot() - Complex::ONE).abs() < 1e-12);
     }
 
     #[test]

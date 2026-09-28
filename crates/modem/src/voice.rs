@@ -460,10 +460,11 @@ impl VoiceTx {
         };
         let codeword = VoiceCodeword { seq: self.seq & 0x1F, frames, end, text };
         self.seq = self.seq.wrapping_add(1);
-        let mut symbols = codeword_slots(self.in_burst * self.mode.slots, &self.mode.encode(&codeword));
+        let modulation = self.mode.modulation;
+        let mut symbols = codeword_slots(modulation, self.in_burst * self.mode.slots, &self.mode.encode(&codeword));
         self.in_burst += 1;
         if end || self.in_burst == per_burst {
-            symbols.extend(pilot_symbols(self.in_burst * self.mode.slots));
+            symbols.extend(pilot_symbols(modulation, self.in_burst * self.mode.slots));
             self.in_burst = 0;
             self.burst = self.burst.wrapping_add(1);
             self.preamble_sent = false;

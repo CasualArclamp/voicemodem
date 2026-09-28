@@ -164,8 +164,9 @@ fn the_display_keeps_its_points_from_one_burst_to_the_next() {
     }
     // And a new modulation starts it afresh, with only its own points.
     assert_eq!(rx.modulation(), Some(modem::Modulation::Psk8));
+    // QPSK's points are all on the diagonals, so one on an axis is 8PSK's.
     let turned: Vec<f64> = rx.points().iter().map(|z| (z.arg() / (std::f64::consts::TAU / 8.0)).round()).collect();
-    assert!(turned.iter().any(|k| k.rem_euclid(2.0) == 1.0), "no 8PSK points among {} shown", turned.len());
+    assert!(turned.iter().any(|k| k.rem_euclid(2.0) == 0.0), "no 8PSK points among {} shown", turned.len());
 }
 
 #[test]
