@@ -65,6 +65,26 @@ fn open_neural(codec: Codec) -> Result<Box<dyn SpeechCodec>, String> {
     Err(format!("{} is not built into this copy of the program", codec.label()))
 }
 
+/// Whether `codec` can be opened here, without opening it: for a neural
+/// codec, whether its weights are where they are looked for; if not, what to
+/// do about it. Cheap enough to ask whenever a list of modes is shown.
+pub fn available(codec: Codec) -> Result<(), String> {
+    match codec {
+        Codec::Encodec1500 | Codec::Encodec3000 => neural_available(),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(feature = "neural")]
+fn neural_available() -> Result<(), String> {
+    encodec::find_weights().map(|_| ())
+}
+
+#[cfg(not(feature = "neural"))]
+fn neural_available() -> Result<(), String> {
+    Err("EnCodec is not built into this copy of the program".into())
+}
+
 /// Sample rate conversion over runs of samples.
 #[derive(Debug, Clone)]
 pub struct Rate {

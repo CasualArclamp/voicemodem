@@ -125,19 +125,29 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
 }
 
 fn modes() {
-    println!("{:<16} {:<13} {:<10} {:<13} {:>9} {:>8}", "mode", "profile", "modem", "codec", "latency", "frames");
+    println!(
+        "{:<16} {:<13} {:<10} {:<13} {:>9} {:>8}  {}",
+        "mode", "profile", "modem", "codec", "latency", "frames", "here"
+    );
+    let mut missing = None;
     for m in &VOICE_MODES {
+        let here = voice::available(m.codec);
         println!(
-            "{:<16} {:<13} {:<10} {:<13} {:>7.2} s {:>8}",
+            "{:<16} {:<13} {:<10} {:<13} {:>7.2} s {:>8}  {}",
             m.name,
             m.profile.label(),
             format!("{} {}", m.modulation.label(), m.rate.label()),
             m.codec.label(),
             m.codeword_seconds(),
             m.frames_per_codeword(),
+            if here.is_ok() { "ready" } else { "needs weights" },
         );
+        missing = missing.or(here.err());
     }
     println!("\nlatency is one codeword's air time; mouth to ear is about twice it.");
+    if let Some(why) = missing {
+        println!("{why}");
+    }
 }
 
 fn devices() {

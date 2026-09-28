@@ -8,7 +8,7 @@ use std::time::Duration;
 use eframe::egui::{
     self, Align2, Color32, FontId, Painter, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2,
 };
-use modem::{Codec, Profile, VoiceMode};
+use modem::{Profile, VoiceMode};
 
 use crate::engine::{Command, Status};
 use crate::settings::Settings;
@@ -140,16 +140,21 @@ impl VoiceApp {
             .selected_text(chosen.name)
             .show_ui(ui, |ui| {
                 for m in VoiceMode::of_profile(profile) {
-                    let neural = matches!(m.codec, Codec::Encodec1500 | Codec::Encodec3000);
+                    // Asked each time the list opens, so that weights put in
+                    // place while the program runs are seen.
+                    let missing = voice::available(m.codec).err();
                     let label = format!(
                         "{}  {} {}, {}{}",
                         m.name,
                         m.modulation.label(),
                         m.rate.label(),
                         m.codec.label(),
-                        if neural { " (not yet)" } else { "" }
+                        if missing.is_some() { " (needs weights)" } else { "" }
                     );
-                    ui.selectable_value(&mut chosen, m, label);
+                    let item = ui.selectable_value(&mut chosen, m, label);
+                    if let Some(why) = missing {
+                        item.on_hover_text(why);
+                    }
                 }
             });
         if chosen != mode {

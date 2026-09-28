@@ -95,6 +95,22 @@ pub fn weight_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// The weights file, if there is one where it is looked for; if not, what to
+/// do about it.
+pub fn find_weights() -> Result<PathBuf, String> {
+    let paths = weight_paths();
+    if let Some(path) = paths.iter().find(|p| p.is_file()) {
+        return Ok(path.clone());
+    }
+    let tried: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    Err(format!(
+        "EnCodec needs Meta's weights, which are not part of this program (CC-BY-NC 4.0): download \
+         model.safetensors from https://huggingface.co/facebook/encodec_24khz (about 93 MB) and save it \
+         as one of: {}",
+        tried.join(", ")
+    ))
+}
+
 /// The model, loading it the first time it is asked for.
 pub fn shared() -> Result<Arc<dyn Network>, String> {
     static LOADED: OnceLock<Mutex<Option<Arc<Encodec>>>> = OnceLock::new();
@@ -103,16 +119,8 @@ pub fn shared() -> Result<Arc<dyn Network>, String> {
     if let Some(model) = guard.as_ref() {
         return Ok(model.clone());
     }
-    let paths = weight_paths();
-    let Some(path) = paths.iter().find(|p| p.is_file()) else {
-        let tried: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-        return Err(format!(
-            "EnCodec needs Meta's weights, which are not part of this program (CC-BY-NC 4.0): download \
-             model.safetensors from https://huggingface.co/facebook/encodec_24khz (about 93 MB) and save it \
-             as one of: {}",
-            tried.join(", ")
-        ));
-    };
+    let path = find_weights()?;
+    let path = path.as_path();
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let vb = VarBuilder::from_buffered_safetensors(bytes, DType::F32, &Device::Cpu).map_err(fail)?;
     let model = Model::new(&Config::default(), vb).map_err(|e| format!("{}: {e}", path.display()))?;
