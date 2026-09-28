@@ -12,6 +12,14 @@ from its live-proven QAM core. `crates/dsp` is BinModem's DSP crate, copied
 with two small additions (see its `lib.rs`), so fixes can move between the two
 projects by diff.
 
+![The window receiving narrow-robust at 9.5 dB Es/N0](docs/decoding.png)
+
+Decoding a moderate signal: narrow-robust (QPSK 1/2, Codec 2 1200) on the
+loopback at 10 dB Es/N0, which the receiver measures as 9.5 dB. The
+constellation has built up over the transmission so far, beside the radio
+audio's spectrum with the mode's band marked. Every codeword has arrived, and
+the text sent alongside runs along the receive panel.
+
 ## Quick start
 
 1. Run `voicemodem.exe`.
@@ -182,13 +190,15 @@ voicemodem rx <in.wav> [speech.wav]          a recording of the modem back to sp
 voicemodem selftest [opts]                   speech through a simulated radio channel
 voicemodem loop [opts]                       the same in real time, through the live engine
 voicemodem compare <a.wav> <b.wav>           how far the second recording strays from the first
-voicemodem demo                              the window on the loopback, talking to itself
+voicemodem demo [opts]                       the window on the loopback, talking to itself
 voicemodem modes                             the voice modes, and which can be used here
 voicemodem devices                           the audio devices this machine has
 ```
 
 `voicemodem help` lists the options: noise, mistuning, Doppler, fading, clock
-error, and where to save the audio.
+error, and where to save the audio. `demo --picture <file.png>` saves a
+picture of the window once its scopes have filled, and closes it; the one
+above is `demo --snr 10 --text "CQ DE N0CALL " --picture docs/decoding.png`.
 
 ## Building
 

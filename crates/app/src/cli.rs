@@ -2,7 +2,7 @@
 //! through a simulated radio channel, the same through the live engine, and
 //! what audio this machine has.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use modem::channel::Channel;
 use modem::profile::FS;
@@ -11,7 +11,7 @@ use voice::{Listener, Rate, Talker};
 
 pub const USAGE: &str = "\
 voicemodem                                   the window: talk and listen through a radio
-voicemodem demo                              the window on the loopback, talking to itself
+voicemodem demo [opts]                       the window on the loopback, talking to itself
 voicemodem tx <speech.wav> <out.wav> [opts]  speech to the modem's audio, as a recording
 voicemodem rx <in.wav> [speech.wav]          a recording of the modem back to speech
 voicemodem selftest [opts]                   speech through a simulated radio channel
@@ -19,6 +19,13 @@ voicemodem loop [opts]                       the same in real time, through the 
 voicemodem compare <a.wav> <b.wav>           how far the second recording strays from the first
 voicemodem modes                             the voice modes
 voicemodem devices                           the audio devices this machine has
+
+demo options:
+  --mode <name>        voice mode (default: the window's own)
+  --snr <dB>           the loopback's noise (default: the window's own)
+  --text <text>        a short text sent alongside
+  --picture <file.png> save a picture of the window 9 s in, then close; it
+                       starts from the default settings, not the window's own
 
 tx options:
   --mode <name>        voice mode (default narrow-robust); see `modes`
@@ -60,6 +67,26 @@ struct Opts {
     save: Option<String>,
     radio_in: Option<String>,
     radio_out: Option<String>,
+    picture: Option<String>,
+}
+
+/// How `voicemodem demo` is to run: what to change from the window's own
+/// settings, and where to save a picture of it, if anywhere.
+#[derive(Debug, Default)]
+pub struct Demo {
+    pub mode: Option<&'static VoiceMode>,
+    pub snr: Option<f64>,
+    pub text: Option<String>,
+    pub picture: Option<PathBuf>,
+}
+
+/// The options after `voicemodem demo`.
+pub fn demo(args: &[String]) -> Result<Demo, String> {
+    let o = parse(args)?;
+    if let Some(extra) = o.positional.first() {
+        return Err(format!("demo takes no {extra:?}\n\n{USAGE}"));
+    }
+    Ok(Demo { mode: o.mode, snr: o.snr, text: o.text, picture: o.picture.map(PathBuf::from) })
 }
 
 fn number(name: &str, value: &str) -> Result<f64, String> {
@@ -92,6 +119,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--save" => opts.save = Some(value("--save")?),
             "--radio-in" => opts.radio_in = Some(value("--radio-in")?),
             "--radio-out" => opts.radio_out = Some(value("--radio-out")?),
+            "--picture" => opts.picture = Some(value("--picture")?),
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
             other => opts.positional.push(other.to_string()),
         }

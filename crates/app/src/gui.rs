@@ -1,6 +1,7 @@
 //! The window: lines, the transmitter's controls, the push-to-talk button,
 //! and what the receiver hears.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,11 +47,38 @@ pub struct VoiceApp {
     /// A demonstration: when it started, and whether it is talking now.
     demo: Option<Instant>,
     demo_talking: bool,
+    /// A picture of the window to take in a demonstration.
+    picture: Option<Picture>,
 }
 
 /// A demonstration talks for this long in every cycle of this long.
 const DEMO_TALK: f64 = 10.0;
 const DEMO_CYCLE: f64 = 15.0;
+
+/// Seconds into a demonstration that its picture is taken: most of the way
+/// through its first transmission, with the constellation built up, the
+/// text ticker full and the transmitter still talking.
+const PICTURE_AT: f64 = 9.0;
+
+/// A picture of the window to save, and what came of saving it, for whoever
+/// opened the window to hear once it has closed.
+#[derive(Debug)]
+pub struct Picture {
+    path: PathBuf,
+    outcome: Arc<Mutex<Option<Result<(), String>>>>,
+    asked: bool,
+}
+
+impl Picture {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, outcome: Arc::new(Mutex::new(None)), asked: false }
+    }
+
+    /// Where what came of it will be, once something has.
+    pub fn outcome(&self) -> Arc<Mutex<Option<Result<(), String>>>> {
+        Arc::clone(&self.outcome)
+    }
+}
 
 impl std::fmt::Debug for VoiceApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,8 +87,15 @@ impl std::fmt::Debug for VoiceApp {
 }
 
 impl VoiceApp {
-    /// The window; with `demo`, on the loopback, talking to itself.
-    pub fn new(commands: Sender<Command>, status: Arc<Mutex<Status>>, settings: Settings, demo: bool) -> Self {
+    /// The window; with `demo`, on the loopback, talking to itself, and with
+    /// `picture`, saving a picture of itself and closing.
+    pub fn new(
+        commands: Sender<Command>,
+        status: Arc<Mutex<Status>>,
+        settings: Settings,
+        demo: bool,
+        picture: Option<Picture>,
+    ) -> Self {
         let app = Self {
             commands,
             status,
@@ -74,6 +109,7 @@ impl VoiceApp {
             constellation_open: false,
             demo: demo.then(Instant::now),
             demo_talking: false,
+            picture,
         };
         app.send(Command::Mode(app.mode()));
         app.send(Command::Text(app.settings.text.clone()));
@@ -103,6 +139,32 @@ impl VoiceApp {
         self.demo_talking = talk;
     }
 
+    /// In a demonstration with a picture to take: ask for one once the
+    /// scopes have filled, and when it comes, save it and close.
+    fn take_picture(&mut self, ctx: &egui::Context) {
+        let (Some(picture), Some(started)) = (self.picture.as_mut(), self.demo) else { return };
+        if !picture.asked {
+            if started.elapsed().as_secs_f64() >= PICTURE_AT {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                picture.asked = true;
+            }
+            return;
+        }
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let saved = save_png(&picture.path, &image);
+            if let Ok(mut outcome) = picture.outcome.lock() {
+                *outcome = Some(saved);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     fn send(&self, command: Command) {
         let _ = self.commands.send(command);
     }
@@ -112,7 +174,11 @@ impl VoiceApp {
     }
 
     fn changed(&self) {
-        self.settings.save();
+        // A picture's window starts from the defaults; saving them would put
+        // them in place of the operator's own.
+        if self.picture.is_none() {
+            self.settings.save();
+        }
     }
 
     /// The row of lines: the radio's devices or the loopback, and the
@@ -384,6 +450,7 @@ impl eframe::App for VoiceApp {
         }
         ui.ctx().request_repaint_after(Duration::from_millis(50));
         self.demonstrate();
+        self.take_picture(ui.ctx());
 
         egui::Panel::top("lines").show(ui, |ui| {
             ui.add_space(4.0);
@@ -463,6 +530,21 @@ fn meter(ui: &mut Ui, label: &str, dbfs: f64) {
 fn last_chars(text: &str, n: usize) -> &str {
     let start = text.char_indices().rev().take(n).last().map_or(text.len(), |(i, _)| i);
     &text[start..]
+}
+
+/// `image` as a PNG at `path`, its colour alone: the window is opaque, and
+/// what the framebuffer holds for alpha says nothing.
+fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
+    let [w, h] = image.size;
+    let rgb: Vec<u8> = image.pixels.iter().flat_map(|c| [c.r(), c.g(), c.b()]).collect();
+    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = std::fs::File::create(path).map_err(|e| fail(&e))?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| fail(&e))?;
+    writer.write_image_data(&rgb).map_err(|e| fail(&e))?;
+    writer.finish().map_err(|e| fail(&e))
 }
 
 fn allocate(ui: &mut Ui, size: egui::Vec2) -> (Rect, Painter) {
