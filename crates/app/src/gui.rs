@@ -32,6 +32,11 @@ pub struct VoiceApp {
     settings: Settings,
     inputs: Vec<String>,
     outputs: Vec<String>,
+    /// Whether the engine was last told to open the lines rather than close
+    /// them; while it was, a device chosen takes effect at once. Not the
+    /// view's `open`, which is false while no line would open: just when
+    /// choosing another device ought to try it.
+    lines_open: bool,
     /// What the engine was last told about the transmitter's key, and the
     /// latch's state when latching.
     keyed: bool,
@@ -63,6 +68,7 @@ impl VoiceApp {
             settings,
             inputs: line::input_devices(),
             outputs: line::output_devices(),
+            lines_open: demo,
             keyed: false,
             latched_on: false,
             constellation_open: false,
@@ -76,8 +82,7 @@ impl VoiceApp {
         if demo {
             // The loopback, and the mic and speaker if they have been chosen:
             // with no speaker it is still something to look at.
-            let operator = (!app.settings.mic.is_empty() && !app.settings.speaker.is_empty())
-                .then(|| (app.settings.mic.clone(), app.settings.speaker.clone()));
+            let operator = chosen_operator(&app.settings);
             app.send(Command::Open { radio: None, loopback_snr: app.settings.loopback_snr, operator });
         }
         app
@@ -113,11 +118,12 @@ impl VoiceApp {
     /// The row of lines: the radio's devices or the loopback, and the
     /// operator's.
     fn lines(&mut self, ui: &mut Ui) {
+        // As the settings were before this frame's widgets, to tell once they
+        // are drawn which line, if either, a click has changed.
+        let before = self.settings.clone();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("radio").strong());
-            if ui.checkbox(&mut self.settings.loopback, "loopback, no radio").changed() {
-                self.changed();
-            }
+            ui.checkbox(&mut self.settings.loopback, "loopback, no radio");
             if self.settings.loopback {
                 ui.label("SNR");
                 if ui
@@ -128,7 +134,6 @@ impl VoiceApp {
                     // Straight into the running loopback: before, it was read
                     // only when the lines were opened.
                     self.send(Command::LoopbackSnr(self.settings.loopback_snr));
-                    self.changed();
                 }
             } else {
                 device(ui, "in", &mut self.settings.radio_in, &self.inputs, "radio in");
@@ -140,21 +145,29 @@ impl VoiceApp {
             device(ui, "speaker", &mut self.settings.speaker, &self.outputs, "speaker");
             ui.separator();
             if ui.button("Open").on_hover_text("Open the lines chosen, closing any that are open").clicked() {
-                let radio = (!self.settings.loopback)
-                    .then(|| (self.settings.radio_in.clone(), self.settings.radio_out.clone()));
-                let operator = (!self.settings.mic.is_empty() && !self.settings.speaker.is_empty())
-                    .then(|| (self.settings.mic.clone(), self.settings.speaker.clone()));
+                let radio = chosen_radio(&self.settings);
+                let operator = chosen_operator(&self.settings);
                 self.send(Command::Open { radio, loopback_snr: self.settings.loopback_snr, operator });
+                self.lines_open = true;
                 self.changed();
             }
             if ui.button("Close").clicked() {
                 self.send(Command::Close);
+                self.lines_open = false;
             }
             if ui.button("⟳").on_hover_text("Look for audio devices again").clicked() {
                 self.inputs = line::input_devices();
                 self.outputs = line::output_devices();
             }
         });
+        if self.settings != before {
+            self.changed();
+            if self.lines_open {
+                for command in switched(&before, &self.settings) {
+                    self.send(command);
+                }
+            }
+        }
         ui.label(RichText::new(&self.view.lines).color(LABEL).small());
     }
 
@@ -399,6 +412,37 @@ fn device(ui: &mut Ui, label: &str, chosen: &mut String, names: &[String], id: &
     });
 }
 
+/// The radio's line as `settings` choose it: its two devices, or None for
+/// the loopback. A device not chosen yet goes as an empty name, which the
+/// engine waits on rather than guessing at.
+fn chosen_radio(settings: &Settings) -> Option<(String, String)> {
+    (!settings.loopback).then(|| (settings.radio_in.clone(), settings.radio_out.clone()))
+}
+
+/// The operator's line as `settings` choose it: the mic and the speaker, or
+/// None until both are chosen.
+fn chosen_operator(settings: &Settings) -> Option<(String, String)> {
+    (!settings.mic.is_empty() && !settings.speaker.is_empty())
+        .then(|| (settings.mic.clone(), settings.speaker.clone()))
+}
+
+/// What open lines are to be told when the settings go from `before` to
+/// `now`: the line whose devices changed, or the radio's when the loopback
+/// is ticked or unticked, reopened on its own, so that the other and
+/// whatever is being sent or heard carry on.
+fn switched(before: &Settings, now: &Settings) -> Vec<Command> {
+    let mut commands = Vec::new();
+    let radio = chosen_radio(now);
+    if radio != chosen_radio(before) {
+        commands.push(Command::Radio(radio));
+    }
+    let operator = chosen_operator(now);
+    if operator != chosen_operator(before) {
+        commands.push(Command::Operator(operator));
+    }
+    commands
+}
+
 /// A level bar from -60 to 0 dBFS.
 fn meter(ui: &mut Ui, label: &str, dbfs: f64) {
     ui.horizontal(|ui| {
@@ -580,5 +624,35 @@ mod tests {
         assert_eq!(last_chars("", 16), "");
         // As does any text when no characters are asked for.
         assert_eq!(last_chars("N0CALL", 0), "");
+    }
+
+    /// Make `edit` to `settings`, as a click in the row would, and say what
+    /// open lines are then told: the commands in their debug form, which is
+    /// plainer to read and to compare than a match on each.
+    fn sent(settings: &mut Settings, edit: impl FnOnce(&mut Settings)) -> String {
+        let before = settings.clone();
+        edit(settings);
+        format!("{:?}", switched(&before, settings))
+    }
+
+    #[test]
+    fn a_change_reopens_only_the_line_it_belongs_to() {
+        // As the window first runs: on the loopback, with nothing chosen.
+        let mut s = Settings::default();
+        // Off the loopback, with neither of the radio's devices chosen yet:
+        // the engine is told, and waits for them.
+        assert_eq!(sent(&mut s, |s| s.loopback = false), r#"[Radio(Some(("", "")))]"#);
+        assert_eq!(sent(&mut s, |s| s.radio_in = "A".into()), r#"[Radio(Some(("A", "")))]"#);
+        assert_eq!(sent(&mut s, |s| s.radio_out = "B".into()), r#"[Radio(Some(("A", "B")))]"#);
+        // A mic with no speaker leaves the operator's line as it was, on
+        // neither; the speaker too opens it.
+        assert_eq!(sent(&mut s, |s| s.mic = "M".into()), "[]");
+        assert_eq!(sent(&mut s, |s| s.speaker = "S".into()), r#"[Operator(Some(("M", "S")))]"#);
+        assert_eq!(sent(&mut s, |s| s.mic = "N".into()), r#"[Operator(Some(("N", "S")))]"#);
+        assert_eq!(sent(&mut s, |s| s.loopback = true), "[Radio(None)]");
+        // The loopback's noise has its own command, and the rest of the
+        // settings nothing to do with the lines.
+        assert_eq!(sent(&mut s, |s| s.loopback_snr = 20.0), "[]");
+        assert_eq!(sent(&mut s, |s| s.level = -20.0), "[]");
     }
 }
