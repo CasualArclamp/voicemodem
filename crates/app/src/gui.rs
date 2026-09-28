@@ -125,6 +125,9 @@ impl VoiceApp {
                     .on_hover_text("Es/N0 of the noise added between the transmitter and the receiver")
                     .changed()
                 {
+                    // Straight into the running loopback: before, it was read
+                    // only when the lines were opened.
+                    self.send(Command::LoopbackSnr(self.settings.loopback_snr));
                     self.changed();
                 }
             } else {
@@ -422,22 +425,32 @@ fn symbol_scope(ui: &mut Ui, points: &[[f32; 2]], label: &str, quality: Option<f
     painter.rect_filled(rect, 0.0, Color32::BLACK);
 
     let centre = rect.center();
-    // Square, so the two axes share a scale.
-    let radius = (rect.width().min(rect.height()) * 0.5) - 12.0;
+    // Square, so the two axes share a scale. A unit-magnitude symbol -- every
+    // PSK point -- sits at the arm tips, which are drawn well inside the
+    // edge: BinModem puts them 12 pixels from it, which suits V.34's grid,
+    // and here left noisy PSK symbols falling off the scope. With the tips
+    // at 1/REACH of the way out, a symbol blown out to REACH still lands
+    // inside, and one blown further is pinned to the edge rather than lost.
+    const REACH: f32 = 1.6;
+    let half = rect.width().min(rect.height()) * 0.5 - 4.0;
+    let radius = half / REACH;
     let axis = Color32::from_rgb(70, 130, 200);
-    painter.line_segment([pos2(centre.x - radius, centre.y), pos2(centre.x + radius, centre.y)], Stroke::new(1.5, axis));
-    painter.line_segment([pos2(centre.x, centre.y - radius), pos2(centre.x, centre.y + radius)], Stroke::new(1.5, axis));
-    for dx in [-1.0f32, 1.0] {
-        let x = centre.x + dx * radius;
-        painter.line_segment([pos2(x, centre.y - 5.0), pos2(x, centre.y + 5.0)], Stroke::new(1.0, axis.gamma_multiply(0.8)));
+    painter.line_segment([pos2(centre.x - half, centre.y), pos2(centre.x + half, centre.y)], Stroke::new(1.5, axis));
+    painter.line_segment([pos2(centre.x, centre.y - half), pos2(centre.x, centre.y + half)], Stroke::new(1.5, axis));
+    let tick = Stroke::new(1.0, axis.gamma_multiply(0.8));
+    for d in [-1.0f32, 1.0] {
+        let x = centre.x + d * radius;
+        painter.line_segment([pos2(x, centre.y - 5.0), pos2(x, centre.y + 5.0)], tick);
+        let y = centre.y + d * radius;
+        painter.line_segment([pos2(centre.x - 5.0, y), pos2(centre.x + 5.0, y)], tick);
     }
 
-    // A unit-magnitude symbol sits at the arm tip; PSK's points all do.
-    let at = |re: f32, im: f32| pos2(centre.x + re.clamp(-1.4, 1.4) * radius, centre.y - im.clamp(-1.4, 1.4) * radius);
     let mut mesh = egui::Mesh::default();
-    let crowded = points.len() > 200;
-    let side = (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 };
-    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if crowded { 110 } else { 150 });
+    let side = (half / 150.0).clamp(1.5, 3.0);
+    let edge = REACH - side / radius;
+    let at = |re: f32, im: f32| pos2(centre.x + re.clamp(-edge, edge) * radius, centre.y - im.clamp(-edge, edge) * radius);
+    // Faint, so that the symbols landing on a point build up into it.
+    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if points.len() > 1024 { 90 } else { 150 });
     for p in points {
         mesh.add_colored_rect(Rect::from_center_size(at(p[0], p[1]), vec2(side, side)), colour);
     }

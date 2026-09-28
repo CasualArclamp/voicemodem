@@ -64,6 +64,8 @@ pub enum Command {
     Mode(&'static VoiceMode),
     Text(String),
     Level(f64),
+    /// The loopback's noise, as Es/N0 in decibels, from now.
+    LoopbackSnr(f64),
     Ptt(bool),
     /// Keep decoding while transmitting: a satellite's own downlink.
     FullDuplex(bool),
@@ -286,6 +288,16 @@ impl Engine {
             }
             Command::Ptt(down) => self.key(down),
             Command::FullDuplex(on) => self.full_duplex = on,
+            Command::LoopbackSnr(snr) => {
+                if let Some(lb) = &mut self.loopback {
+                    lb.snr_db = snr;
+                    let now = format!("loopback at {snr:.0} dB");
+                    self.lines = match self.lines.split_once("; ") {
+                        Some((_, rest)) => format!("{now}; {rest}"),
+                        None => now,
+                    };
+                }
+            }
             Command::Quit => {}
         }
     }
@@ -562,5 +574,34 @@ impl Engine {
             hz_per_bin: FS / self.spectrum.size() as f64,
             log: self.log.clone(),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The loopback's noise power over the next `seconds`, with nothing on
+    /// the air.
+    fn noise_power(lb: &mut Loopback, seconds: f64) -> f64 {
+        let mut got = Vec::new();
+        let until = Instant::now() + Duration::from_secs_f64(seconds);
+        while Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+            lb.receive(&mut got, -12.0, 1600.0);
+        }
+        got.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / got.len().max(1) as f64
+    }
+
+    #[test]
+    fn the_loopback_takes_a_new_snr_while_it_runs() {
+        let mut lb = Loopback::new(10.0);
+        let before = noise_power(&mut lb, 0.1);
+        // What the window's slider now sends, straight into the running
+        // loopback.
+        lb.snr_db = 30.0;
+        let after = noise_power(&mut lb, 0.1);
+        let fell = 10.0 * (before / after).log10();
+        assert!((fell - 20.0).abs() < 1.0, "noise fell {fell:.1} dB for a 20 dB step");
     }
 }

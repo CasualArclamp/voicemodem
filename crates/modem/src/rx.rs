@@ -61,9 +61,9 @@ const LEAST_TRAINED_DB: f64 = 1.0;
 /// a detector bank to find it too: three symbols narrow.
 const HOLD: u64 = 30;
 
-/// Points kept for a display: 128 on each point of 8PSK, the scope's last
-/// half second or so.
-const DISPLAY: usize = 1024;
+/// Points kept for a display: 512 on each point of 8PSK, about the last two
+/// seconds, so that the clusters build up as BinModem's V.34 scope's do.
+const DISPLAY: usize = 4096;
 
 /// What the receiver has to say.
 #[derive(Debug, Clone, PartialEq)]
