@@ -182,7 +182,7 @@ fn transmit(mode: &'static VoiceMode, speech: &[f32], text: &str, level: f64) ->
     talker.finish(&mut frames);
     let mut tx = VoiceTx::new(mode, stream_id(), text);
     for frame in frames {
-        tx.push_frame(frame);
+        tx.push_frame(frame.bits);
     }
     tx.end();
     let mut modulator = Modulator::new(mode.profile, level);

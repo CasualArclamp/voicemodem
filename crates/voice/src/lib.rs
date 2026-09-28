@@ -30,6 +30,10 @@ pub trait SpeechCodec: Send + std::fmt::Debug {
     /// Speech samples a second the codec works at.
     fn sample_rate(&self) -> u32;
 
+    /// Samples of speech, at [`SpeechCodec::sample_rate`], each frame is made
+    /// of, in order.
+    fn frame_samples(&self) -> usize;
+
     /// Take speech, at [`SpeechCodec::sample_rate`], full scale one; push
     /// each frame that is complete, as its bits.
     fn encode(&mut self, speech: &[f32], frames: &mut Vec<Vec<u8>>);
@@ -113,12 +117,33 @@ impl Rate {
     }
 }
 
+/// A codec frame, and whether the speech it came from was silence -- a pause
+/// a transmitter that has fallen behind may drop to catch up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spoken {
+    pub bits: Vec<u8>,
+    pub quiet: bool,
+}
+
+/// How far under the loudest recent speech a frame counts as silence, and
+/// the level under which it always does.
+const QUIET_BELOW_LOUDEST_DB: f64 = 30.0;
+const QUIET_FLOOR_DB: f64 = -60.0;
+/// How fast the loudest recent speech is forgotten, in decibels a frame.
+const LOUDEST_DECAY_DB: f64 = 0.05;
+
 /// Speech at the line's rate in, codec frames out.
 #[derive(Debug)]
 pub struct Talker {
     codec: Box<dyn SpeechCodec>,
     rate: Rate,
     converted: Vec<f32>,
+    /// Speech at the codec's rate not yet a whole frame, the levels of the
+    /// frames the codec has not yet handed back, and the loudest recent.
+    window: Vec<f32>,
+    levels: VecDeque<f64>,
+    loudest: f64,
+    raw: Vec<Vec<u8>>,
 }
 
 impl Talker {
@@ -126,19 +151,58 @@ impl Talker {
     pub fn new(mode: &VoiceMode, line_rate: f64) -> Result<Self, String> {
         let codec = open(mode.codec)?;
         let rate = Rate::new(line_rate, f64::from(codec.sample_rate()));
-        Ok(Self { codec, rate, converted: Vec::new() })
+        Ok(Self {
+            codec,
+            rate,
+            converted: Vec::new(),
+            window: Vec::new(),
+            levels: VecDeque::new(),
+            loudest: QUIET_FLOOR_DB,
+            raw: Vec::new(),
+        })
     }
 
     /// Take speech; push the frames it completes.
-    pub fn speak(&mut self, speech: &[f32], frames: &mut Vec<Vec<u8>>) {
+    pub fn speak(&mut self, speech: &[f32], frames: &mut Vec<Spoken>) {
         self.converted.clear();
         self.rate.process(speech, &mut self.converted);
-        self.codec.encode(&self.converted, frames);
+        // Each frame's level, from the same samples the codec makes it of.
+        let per = self.codec.frame_samples();
+        for &x in &self.converted {
+            self.window.push(x);
+            if self.window.len() == per {
+                let power = self.window.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / per as f64;
+                self.levels.push_back(10.0 * (power + 1e-12).log10());
+                self.window.clear();
+            }
+        }
+        self.raw.clear();
+        self.codec.encode(&self.converted, &mut self.raw);
+        self.hand_back(frames);
     }
 
     /// The speaker has let go: push frames for whatever is held back.
-    pub fn finish(&mut self, frames: &mut Vec<Vec<u8>>) {
-        self.codec.finish_encoding(frames);
+    pub fn finish(&mut self, frames: &mut Vec<Spoken>) {
+        self.raw.clear();
+        self.codec.finish_encoding(&mut self.raw);
+        self.hand_back(frames);
+        self.window.clear();
+        self.levels.clear();
+    }
+
+    fn hand_back(&mut self, frames: &mut Vec<Spoken>) {
+        for bits in self.raw.drain(..) {
+            // A frame made up of padding at the end has no level of its own:
+            // it is not dropped.
+            let quiet = match self.levels.pop_front() {
+                Some(db) => {
+                    self.loudest = db.max(self.loudest - LOUDEST_DECAY_DB);
+                    db < (self.loudest - QUIET_BELOW_LOUDEST_DB).max(QUIET_FLOOR_DB)
+                }
+                None => false,
+            };
+            frames.push(Spoken { bits, quiet });
+        }
     }
 }
 

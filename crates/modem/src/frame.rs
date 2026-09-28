@@ -33,7 +33,7 @@ use dsp::Complex;
 
 use crate::fec::{self, Interleaver, Rate};
 use crate::profile::{
-    CODEWORD_SYMBOLS, DATA, DOTS, HEADER_BITS, HEADER_BYTES, HEADER_SYMBOLS, MAX_CODEWORDS, PILOT, PREAMBLE, Profile,
+    DATA, DOTS, HEADER_BITS, HEADER_BYTES, HEADER_SYMBOLS, MAX_CODEWORDS, PILOT, PREAMBLE, Profile,
     SLOTS_PER_CODEWORD, UW,
 };
 use crate::psk::Modulation;
@@ -239,14 +239,20 @@ pub fn pilots(slot: usize) -> [f64; PILOT] {
 
 /// How a codeword is laid out for one modulation and rate.
 ///
-/// A codeword always fills [`CODEWORD_SYMBOLS`] data symbols, eight slots'
-/// worth, so the framing is the same whatever the mode; what changes is how
-/// many bytes fit. Those bytes are a block number, the block's payload and a
+/// A codeword fills the data symbols of a whole number of slots: eight for a
+/// data transfer ([`crate::profile::CODEWORD_SYMBOLS`]), whose blocks want the interleaving
+/// and do not mind the wait, and fewer for speech, which minds the wait -- a
+/// codeword can only be sent once its speech has been spoken and only played
+/// once it has all arrived. What changes with the mode is how much fits. A
+/// data codeword's bytes are a block number, the block's payload and a
 /// CRC-32.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Geometry {
     pub modulation: Modulation,
     pub rate: Rate,
+    /// Slots a codeword spans, and the interleaver across its channel bits.
+    pub slots: usize,
+    interleaver: std::sync::Arc<Interleaver>,
     /// Bits the data symbols carry.
     pub channel_bits: usize,
     /// Encoder input bits, tail included: a whole number of puncturing
@@ -264,14 +270,35 @@ pub struct Geometry {
 const BLOCK_OVERHEAD: usize = 2 + 4;
 
 impl Geometry {
+    /// A data transfer's codeword: [`SLOTS_PER_CODEWORD`] slots.
     pub fn new(modulation: Modulation, rate: Rate) -> Self {
-        let channel_bits = CODEWORD_SYMBOLS * modulation.bits();
+        Self::with_slots(modulation, rate, SLOTS_PER_CODEWORD)
+    }
+
+    /// A codeword spanning `slots` slots.
+    pub fn with_slots(modulation: Modulation, rate: Rate, slots: usize) -> Self {
+        let channel_bits = slots * DATA * modulation.bits();
         let (per, sent) = rate.period();
         let periods = channel_bits / sent;
         let inputs = periods * per;
         let coded = periods * sent;
         let bytes = (inputs - fec::TAIL) / 8;
-        Self { modulation, rate, channel_bits, inputs, coded, bytes, payload: bytes - BLOCK_OVERHEAD }
+        Self {
+            modulation,
+            rate,
+            slots,
+            interleaver: std::sync::Arc::new(Interleaver::new(channel_bits)),
+            channel_bits,
+            inputs,
+            coded,
+            bytes,
+            payload: bytes.saturating_sub(BLOCK_OVERHEAD),
+        }
+    }
+
+    /// Data symbols a codeword carries.
+    pub fn data_symbols(&self) -> usize {
+        self.slots * DATA
     }
 
     /// Payload bits a second while the payload is going out, pilots
@@ -282,7 +309,7 @@ impl Geometry {
 
     /// Seconds a codeword takes on the line, its pilots included.
     pub fn seconds(&self, profile: Profile) -> f64 {
-        profile.seconds(SLOTS_PER_CODEWORD * crate::profile::SLOT)
+        profile.seconds(self.slots * crate::profile::SLOT)
     }
 
     /// Bits a codeword carries before its tail.
@@ -290,12 +317,8 @@ impl Geometry {
         self.inputs - fec::TAIL
     }
 
-    fn interleaver(&self) -> &'static Interleaver {
-        static TABLES: OnceLock<[Interleaver; 3]> = OnceLock::new();
-        let tables = TABLES.get_or_init(|| {
-            [1, 2, 3].map(|bits| Interleaver::new(CODEWORD_SYMBOLS * bits))
-        });
-        &tables[self.modulation.bits() - 1]
+    fn interleaver(&self) -> &Interleaver {
+        &self.interleaver
     }
 
     /// The data symbols of a codeword carrying `bits`, which are padded with
@@ -364,10 +387,11 @@ pub fn pilot_symbols(slot: usize) -> impl Iterator<Item = Complex> {
 }
 
 /// A codeword's symbols as they go out: each of its slots' pilots and then
-/// its share of `data`, the first slot numbered `first_slot` in the burst.
+/// its share of `data`, a whole number of slots' worth, the first slot
+/// numbered `first_slot` in the burst.
 pub fn codeword_slots(first_slot: usize, data: &[Complex]) -> Vec<Complex> {
-    assert_eq!(data.len(), CODEWORD_SYMBOLS, "a codeword's data symbols");
-    let mut symbols = Vec::with_capacity(SLOTS_PER_CODEWORD * (PILOT + DATA));
+    assert!(!data.is_empty() && data.len().is_multiple_of(DATA), "{} data symbols is not whole slots", data.len());
+    let mut symbols = Vec::with_capacity(data.len() / DATA * (PILOT + DATA));
     for (i, chunk) in data.chunks(DATA).enumerate() {
         symbols.extend(pilot_symbols(first_slot + i));
         symbols.extend_from_slice(chunk);
@@ -380,10 +404,12 @@ pub fn codeword_slots(first_slot: usize, data: &[Complex]) -> Vec<Complex> {
 pub fn burst(header: Header, codewords: &[Vec<Complex>]) -> Vec<Complex> {
     assert_eq!(codewords.len(), usize::from(header.codewords), "the header announces a different count");
     let mut symbols = preamble(header);
-    for (i, codeword) in codewords.iter().enumerate() {
-        symbols.extend(codeword_slots(i * SLOTS_PER_CODEWORD, codeword));
+    let mut slot = 0;
+    for codeword in codewords {
+        symbols.extend(codeword_slots(slot, codeword));
+        slot += codeword.len() / DATA;
     }
-    symbols.extend(pilot_symbols(codewords.len() * SLOTS_PER_CODEWORD));
+    symbols.extend(pilot_symbols(slot));
     symbols
 }
 
@@ -466,7 +492,7 @@ mod tests {
                 assert!(g.coded <= g.channel_bits && g.channel_bits - g.coded < 4);
                 let payload: Vec<u8> = (0..g.payload).map(|i| (i * 7 + 3) as u8).collect();
                 let symbols = g.encode(77, &payload);
-                assert_eq!(symbols.len(), CODEWORD_SYMBOLS);
+                assert_eq!(symbols.len(), crate::profile::CODEWORD_SYMBOLS);
                 let mut soft = Vec::new();
                 for z in &symbols {
                     modulation.demap(*z, 0.5, &mut soft);
@@ -489,6 +515,6 @@ mod tests {
         let h = Header { codewords: 2, total: 2, sequence: 0, ..header() };
         let g = h.geometry();
         let cws = vec![g.encode(0, &[]), g.encode(1, &[])];
-        assert_eq!(burst(h, &cws).len(), crate::profile::burst_symbols(2));
+        assert_eq!(burst(h, &cws).len(), crate::profile::burst_symbols(2, crate::profile::SLOTS_PER_CODEWORD));
     }
 }

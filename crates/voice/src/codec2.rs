@@ -52,6 +52,10 @@ impl SpeechCodec for Codec2Speech {
         8000
     }
 
+    fn frame_samples(&self) -> usize {
+        self.samples
+    }
+
     fn encode(&mut self, speech: &[f32], frames: &mut Vec<Vec<u8>>) {
         self.pending.extend(speech.iter().map(|&x| (x * 32_767.0).round().clamp(-32_768.0, 32_767.0) as i16));
         let mut at = 0;

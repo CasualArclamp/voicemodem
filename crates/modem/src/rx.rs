@@ -406,7 +406,9 @@ impl Receiver {
             self.events.push_back(Event::Untrained { header });
             return;
         };
-        let geometry = header.geometry();
+        // A voice mode says how many slots its codewords span; a transfer's
+        // are always eight.
+        let geometry = voice.map_or_else(|| header.geometry(), |m| m.geometry());
         core.train(Training {
             targets: found.symbols.clone(),
             start,
@@ -421,7 +423,7 @@ impl Receiver {
         let noise = 10f64.powf(-found.snr_db / 10.0);
         let codewords = usize::from(header.codewords);
         let give_up = if voice.is_some() { GIVE_UP_VOICE } else { GIVE_UP_DATA };
-        let end = found.start + burst_symbols(codewords) as f64 * profile.sps();
+        let end = found.start + burst_symbols(codewords, geometry.slots) as f64 * profile.sps();
         self.burst = Some(Box::new(Active {
             framer: Framer::new(geometry.clone(), codewords, noise, give_up),
             geometry,

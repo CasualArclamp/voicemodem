@@ -30,7 +30,7 @@ use dsp::Complex;
 
 use crate::fec::{self, Rate};
 use crate::frame::{Geometry, Header, Kind, codeword_slots, pilot_symbols, preamble};
-use crate::profile::{MAX_CODEWORDS, PILOT, PREAMBLE, Profile, SLOTS_PER_CODEWORD};
+use crate::profile::{MAX_CODEWORDS, PILOT, PREAMBLE, Profile};
 use crate::psk::Modulation;
 
 /// A speech codec, as far as the modem is concerned.
@@ -126,10 +126,22 @@ pub struct VoiceMode {
     pub modulation: Modulation,
     pub rate: Rate,
     pub codec: Codec,
+    /// Slots a codeword spans. Four at either rate is 320 ms narrow and
+    /// 213 ms wide: a codeword is sent only once its speech has been spoken
+    /// and played only once it has all arrived, so its length comes twice
+    /// into the delay. Wide's BPSK needs six to carry its eight frames.
+    pub slots: usize,
 }
 
-const fn mode(name: &'static str, profile: Profile, modulation: Modulation, rate: Rate, codec: Codec) -> VoiceMode {
-    VoiceMode { name, profile, modulation, rate, codec }
+const fn mode(
+    name: &'static str,
+    profile: Profile,
+    modulation: Modulation,
+    rate: Rate,
+    codec: Codec,
+    slots: usize,
+) -> VoiceMode {
+    VoiceMode { name, profile, modulation, rate, codec, slots }
 }
 
 /// Every voice mode, most robust first within each profile.
@@ -138,17 +150,21 @@ const fn mode(name: &'static str, profile: Profile, modulation: Modulation, rate
 /// bit/s once the pilots are paid for, and the lowest Codec2 rate available
 /// in Rust is 1200. Wide's most robust mode is BPSK.
 pub const VOICE_MODES: [VoiceMode; 10] = [
-    mode("narrow-robust", Profile::Narrow, Modulation::Qpsk, Rate::Half, Codec::Codec2_1200),
-    mode("narrow-standard", Profile::Narrow, Modulation::Qpsk, Rate::TwoThirds, Codec::Codec2_1600),
-    mode("narrow-high", Profile::Narrow, Modulation::Psk8, Rate::TwoThirds, Codec::Codec2_2400),
-    mode("narrow-neural", Profile::Narrow, Modulation::Qpsk, Rate::TwoThirds, Codec::Encodec1500),
-    mode("wide-robust", Profile::Wide, Modulation::Bpsk, Rate::TwoThirds, Codec::Codec2_1200),
-    mode("wide-standard", Profile::Wide, Modulation::Qpsk, Rate::Half, Codec::Codec2_1600),
-    mode("wide-high", Profile::Wide, Modulation::Qpsk, Rate::ThreeQuarters, Codec::Codec2_2400),
-    mode("wide-best", Profile::Wide, Modulation::Psk8, Rate::TwoThirds, Codec::Codec2_3200),
-    mode("wide-neural", Profile::Wide, Modulation::Qpsk, Rate::Half, Codec::Encodec1500),
-    mode("wide-neural-hq", Profile::Wide, Modulation::Psk8, Rate::ThreeQuarters, Codec::Encodec3000),
+    mode("narrow-robust", Profile::Narrow, Modulation::Qpsk, Rate::Half, Codec::Codec2_1200, 4),
+    mode("narrow-standard", Profile::Narrow, Modulation::Qpsk, Rate::TwoThirds, Codec::Codec2_1600, 4),
+    mode("narrow-high", Profile::Narrow, Modulation::Psk8, Rate::TwoThirds, Codec::Codec2_2400, 4),
+    mode("narrow-neural", Profile::Narrow, Modulation::Qpsk, Rate::TwoThirds, Codec::Encodec1500, 4),
+    mode("wide-robust", Profile::Wide, Modulation::Bpsk, Rate::TwoThirds, Codec::Codec2_1200, 6),
+    mode("wide-standard", Profile::Wide, Modulation::Qpsk, Rate::Half, Codec::Codec2_1600, 4),
+    mode("wide-high", Profile::Wide, Modulation::Qpsk, Rate::ThreeQuarters, Codec::Codec2_2400, 4),
+    mode("wide-best", Profile::Wide, Modulation::Psk8, Rate::TwoThirds, Codec::Codec2_3200, 4),
+    mode("wide-neural", Profile::Wide, Modulation::Qpsk, Rate::Half, Codec::Encodec1500, 4),
+    mode("wide-neural-hq", Profile::Wide, Modulation::Psk8, Rate::ThreeQuarters, Codec::Encodec3000, 4),
 ];
+
+/// The longest a voice burst is let run between preambles: a receiver that
+/// tunes in late, or loses a burst to a fade, waits no longer than this.
+const BURST_SECONDS: f64 = 5.0;
 
 /// Bits of every voice codeword that are not speech: sequence, count, end,
 /// text and CRC.
@@ -178,7 +194,7 @@ impl VoiceMode {
     }
 
     pub fn geometry(&self) -> Geometry {
-        Geometry::new(self.modulation, self.rate)
+        Geometry::with_slots(self.modulation, self.rate, self.slots)
     }
 
     /// Codec frames a codeword holds.
@@ -198,14 +214,21 @@ impl VoiceMode {
 
     /// Codewords a burst: enough that the speech the codewords can hold
     /// beyond their own air time pays back the preamble's with half as much
-    /// again to spare, so the transmitter never falls behind the speaker.
+    /// again to spare, so the transmitter does not fall behind the speaker;
+    /// but no more than [`BURST_SECONDS`] of them.
+    ///
+    /// A mode whose codewords hold only their own air time's speech -- the
+    /// robust ones, which have the least to spare -- cannot pay a preamble
+    /// back that way. Its transmitter drops frames of silence instead
+    /// ([`VoiceTx`]), which only shortens the pauses between words.
     pub fn codewords_per_burst(&self) -> usize {
+        let longest = ((BURST_SECONDS / self.codeword_seconds()) as usize).clamp(4, MAX_CODEWORDS);
         let spare = self.codeword_speech() - self.codeword_seconds();
         let preamble = self.profile.seconds(PREAMBLE + PILOT);
-        if spare <= 0.0 {
-            return MAX_CODEWORDS;
+        if spare <= 1e-9 {
+            return longest;
         }
-        ((1.5 * preamble / spare).ceil() as usize).clamp(4, MAX_CODEWORDS)
+        ((1.5 * preamble / spare).ceil() as usize).clamp(4, longest)
     }
 
     /// The header of burst `sequence` of transmission `stream`.
@@ -290,6 +313,15 @@ pub struct VoiceCodeword {
 
 /// A transmission being sent: codec frames in as they are spoken, symbols
 /// out as the line wants them.
+///
+/// Every preamble is air time with no speech in it, so after one the
+/// transmitter is that far behind the speaker. A mode whose codewords hold
+/// more speech than their air time catches up by itself. One whose codewords
+/// hold only their own air time's worth -- the robust modes -- catches up by
+/// dropping frames the talker marked as silence: a pause between words comes
+/// out a little shorter, and nothing that was said is lost. Past a cap, if
+/// one is set, the oldest frames go whatever they are, so that someone who
+/// talks without drawing breath is not heard further and further behind.
 #[derive(Debug, Clone)]
 pub struct VoiceTx {
     mode: &'static VoiceMode,
@@ -300,7 +332,12 @@ pub struct VoiceTx {
     in_burst: usize,
     preamble_sent: bool,
     seq: u8,
-    frames: VecDeque<Vec<u8>>,
+    /// Frames waiting, each with whether it is silence.
+    frames: VecDeque<(Vec<u8>, bool)>,
+    cap: Option<usize>,
+    /// Frames of silence dropped to catch up, and frames dropped at the cap.
+    trimmed: usize,
+    dropped: usize,
     text: Vec<u8>,
     text_at: usize,
     ending: bool,
@@ -320,11 +357,22 @@ impl VoiceTx {
             preamble_sent: false,
             seq: 0,
             frames: VecDeque::new(),
+            cap: None,
+            trimmed: 0,
+            dropped: 0,
             text,
             text_at: 0,
             ending: false,
             done: false,
         }
+    }
+
+    /// Never let more than `frames` frames wait: past that the oldest are
+    /// dropped, speech or not. For a live talker; a recording being sent
+    /// wants every frame, however far ahead of the line it is.
+    pub fn with_cap(mut self, frames: usize) -> Self {
+        self.cap = Some(frames.max(self.mode.frames_per_codeword()));
+        self
     }
 
     pub fn mode(&self) -> &'static VoiceMode {
@@ -333,8 +381,43 @@ impl VoiceTx {
 
     /// A codec frame, as its bits.
     pub fn push_frame(&mut self, bits: Vec<u8>) {
+        self.push_spoken(bits, false);
+    }
+
+    /// A codec frame, and whether it is silence that may be dropped to
+    /// catch up.
+    pub fn push_spoken(&mut self, bits: Vec<u8>, quiet: bool) {
         if !self.ending {
-            self.frames.push_back(bits);
+            self.frames.push_back((bits, quiet));
+        }
+    }
+
+    /// Frames of silence dropped to catch up, and frames of anything dropped
+    /// at the cap.
+    pub fn trimmed(&self) -> (usize, usize) {
+        (self.trimmed, self.dropped)
+    }
+
+    /// Catch up on the speaker: silence first, oldest first, down to a
+    /// codeword's worth -- what a transmitter keeping up has waiting when it
+    /// makes a codeword; then, past the cap, whatever is oldest.
+    fn catch_up(&mut self) {
+        let mut over = self.frames.len().saturating_sub(self.mode.frames_per_codeword());
+        let mut i = 0;
+        while over > 0 && i < self.frames.len() {
+            if self.frames[i].1 {
+                self.frames.remove(i);
+                self.trimmed += 1;
+                over -= 1;
+            } else {
+                i += 1;
+            }
+        }
+        if let Some(cap) = self.cap {
+            while self.frames.len() > cap {
+                self.frames.pop_front();
+                self.dropped += 1;
+            }
         }
     }
 
@@ -364,8 +447,9 @@ impl VoiceTx {
             self.preamble_sent = true;
             return Some(preamble(self.mode.header(self.stream, self.burst)));
         }
+        self.catch_up();
         let take = self.mode.frames_per_codeword().min(self.frames.len());
-        let frames: Vec<Vec<u8>> = self.frames.drain(..take).collect();
+        let frames: Vec<Vec<u8>> = self.frames.drain(..take).map(|(bits, _)| bits).collect();
         let end = self.ending && self.frames.is_empty();
         let text = if self.text.is_empty() {
             0
@@ -376,10 +460,10 @@ impl VoiceTx {
         };
         let codeword = VoiceCodeword { seq: self.seq & 0x1F, frames, end, text };
         self.seq = self.seq.wrapping_add(1);
-        let mut symbols = codeword_slots(self.in_burst * SLOTS_PER_CODEWORD, &self.mode.encode(&codeword));
+        let mut symbols = codeword_slots(self.in_burst * self.mode.slots, &self.mode.encode(&codeword));
         self.in_burst += 1;
         if end || self.in_burst == per_burst {
-            symbols.extend(pilot_symbols(self.in_burst * SLOTS_PER_CODEWORD));
+            symbols.extend(pilot_symbols(self.in_burst * self.mode.slots));
             self.in_burst = 0;
             self.burst = self.burst.wrapping_add(1);
             self.preamble_sent = false;
@@ -401,8 +485,55 @@ mod tests {
             let air = n as f64 * mode.codeword_seconds() + mode.profile.seconds(PREAMBLE + PILOT);
             let speech = n as f64 * mode.codeword_speech();
             assert!((1..64).contains(&frames), "{}: {frames} frames", mode.name);
-            assert!(speech > air, "{}: {speech:.3} s of speech in {air:.3} s of air", mode.name);
+            // Every codeword holds at least its own air time's speech...
+            assert!(mode.codeword_speech() >= mode.codeword_seconds() - 1e-9, "{}", mode.name);
+            // ...and the preambles are paid back by the spare, or else by at
+            // most a twentieth of the speech being silence the transmitter
+            // can drop -- ordinary speech pauses for far more than that --
+            // in bursts no longer than five seconds.
+            let short = (air - speech).max(0.0) / air;
+            assert!(short <= 0.05, "{}: {:.1}% of the air time left unpaid", mode.name, 100.0 * short);
+            assert!(air <= BURST_SECONDS + mode.profile.seconds(PREAMBLE + PILOT) + 1e-9, "{}: {air:.1} s bursts", mode.name);
         }
+    }
+
+    #[test]
+    fn half_second_codewords_or_shorter() {
+        for mode in &VOICE_MODES {
+            assert!(mode.codeword_seconds() <= 0.33, "{}: {:.3} s codewords", mode.name, mode.codeword_seconds());
+        }
+    }
+
+    #[test]
+    fn a_transmitter_behind_drops_silence_and_keeps_speech() {
+        let mode = VoiceMode::robust(Profile::Narrow);
+        let per = mode.frames_per_codeword();
+        let mut tx = VoiceTx::new(mode, 1, "");
+        // A codeword's worth of speech, then five frames of silence and five
+        // of speech: five more than a transmitter keeping up has waiting.
+        for i in 0..per + 10 {
+            let quiet = (per..per + 5).contains(&i);
+            tx.push_spoken(vec![u8::from(quiet); mode.codec.bits()], quiet);
+        }
+        tx.next_symbols(); // the preamble
+        tx.next_symbols(); // a codeword, made after catching up
+        assert_eq!(tx.trimmed(), (5, 0));
+        assert_eq!(tx.waiting(), 10 - 5 - (per - per.min(per)));
+        assert!(tx.frames.iter().all(|(_, quiet)| !quiet), "silence left waiting");
+    }
+
+    #[test]
+    fn past_the_cap_the_oldest_go_whatever_they_are() {
+        let mode = VoiceMode::robust(Profile::Narrow);
+        let per = mode.frames_per_codeword();
+        let mut tx = VoiceTx::new(mode, 1, "").with_cap(2 * per);
+        for _ in 0..5 * per {
+            tx.push_frame(vec![1; mode.codec.bits()]);
+        }
+        tx.next_symbols();
+        tx.next_symbols();
+        assert_eq!(tx.trimmed(), (0, 3 * per));
+        assert_eq!(tx.waiting(), per);
     }
 
     #[test]
@@ -442,7 +573,7 @@ mod tests {
             sent.push(symbols.len());
         }
         // A preamble, three codewords, the last with the closing pilots.
-        let codeword = SLOTS_PER_CODEWORD * crate::profile::SLOT;
+        let codeword = mode.slots * crate::profile::SLOT;
         assert_eq!(sent, vec![PREAMBLE, codeword, codeword, codeword + PILOT]);
         assert!(tx.is_done());
     }

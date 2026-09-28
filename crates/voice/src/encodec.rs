@@ -229,6 +229,10 @@ impl SpeechCodec for EncodecSpeech {
         24_000
     }
 
+    fn frame_samples(&self) -> usize {
+        HOP
+    }
+
     fn encode(&mut self, speech: &[f32], frames: &mut Vec<Vec<u8>>) {
         self.input.extend_from_slice(speech);
         while self.input.len() >= CHUNK * HOP {

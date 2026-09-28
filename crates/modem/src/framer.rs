@@ -25,7 +25,7 @@ use std::f64::consts::TAU;
 use dsp::Complex;
 
 use crate::frame::{Geometry, pilots};
-use crate::profile::{DATA, PILOT, SLOT, SLOTS_PER_CODEWORD};
+use crate::profile::{DATA, PILOT, SLOT};
 
 /// Symbols either side of where a slot's pilots are expected that they are
 /// looked for: a 20 ms slip is 48, and the next slot's pilots are 128 away.
@@ -106,10 +106,11 @@ impl Framer {
     /// with an estimate of the noise, as a mean squared error, and giving up
     /// after `give_up` pilots missed in a row.
     pub fn new(geometry: Geometry, codewords: usize, noise: f64, give_up: usize) -> Self {
+        let slots = codewords * geometry.slots;
         Self {
             geometry,
             codewords,
-            slots: codewords * SLOTS_PER_CODEWORD,
+            slots,
             stream: VecDeque::new(),
             first: 0,
             received: 0,
@@ -308,14 +309,14 @@ impl Framer {
             self.erased += 1;
         }
         self.demapped = slot + 1;
-        if self.demapped.is_multiple_of(SLOTS_PER_CODEWORD) {
-            self.decode(self.demapped / SLOTS_PER_CODEWORD - 1);
+        if self.demapped.is_multiple_of(self.geometry.slots) {
+            self.decode(self.demapped / self.geometry.slots - 1);
         }
     }
 
     fn decode(&mut self, codeword: usize) {
         let soft = std::mem::take(&mut self.soft);
-        let soft = (self.erased < SLOTS_PER_CODEWORD).then_some(soft);
+        let soft = (self.erased < self.geometry.slots).then_some(soft);
         self.out.push_back(Framed::Codeword { codeword, soft, erased_slots: self.erased });
         self.erased = 0;
     }
@@ -323,17 +324,17 @@ impl Framer {
     fn finish_burst(&mut self, aborted: bool) {
         if aborted {
             // The codeword under way, with what it has; the rest are lost.
-            let done = self.demapped / SLOTS_PER_CODEWORD;
-            if !self.demapped.is_multiple_of(SLOTS_PER_CODEWORD) {
+            let done = self.demapped / self.geometry.slots;
+            if !self.demapped.is_multiple_of(self.geometry.slots) {
                 let wanted = self.geometry.channel_bits;
                 let have = self.soft.len();
                 self.soft.extend(std::iter::repeat_n(0.0, wanted.saturating_sub(have)));
-                self.erased += SLOTS_PER_CODEWORD - self.demapped % SLOTS_PER_CODEWORD;
+                self.erased += self.geometry.slots - self.demapped % self.geometry.slots;
                 self.decode(done);
             }
-            let next = self.demapped.div_ceil(SLOTS_PER_CODEWORD);
+            let next = self.demapped.div_ceil(self.geometry.slots);
             for codeword in next..self.codewords {
-                self.out.push_back(Framed::Codeword { codeword, soft: None, erased_slots: SLOTS_PER_CODEWORD });
+                self.out.push_back(Framed::Codeword { codeword, soft: None, erased_slots: self.geometry.slots });
             }
         }
         self.done = true;

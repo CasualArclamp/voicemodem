@@ -24,7 +24,7 @@ enum TalkJob {
 #[derive(Debug)]
 pub enum Talked {
     /// Codec frames, in order.
-    Frames(Vec<Vec<u8>>),
+    Frames(Vec<voice::Spoken>),
     /// Everything spoken before [`TalkerThread::finish`] has been handed back.
     Finished,
     Failed(String),

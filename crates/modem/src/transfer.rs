@@ -196,8 +196,8 @@ impl Outgoing {
         let blocks = self.blocks();
         let full = blocks / self.per_burst;
         let rest = blocks % self.per_burst;
-        full as f64 * profile.burst_seconds(self.per_burst)
-            + if rest > 0 { profile.burst_seconds(rest) } else { 0.0 }
+        full as f64 * profile.burst_seconds(self.per_burst, self.geometry.slots)
+            + if rest > 0 { profile.burst_seconds(rest, self.geometry.slots) } else { 0.0 }
     }
 }
 

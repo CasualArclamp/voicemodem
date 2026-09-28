@@ -34,14 +34,20 @@ use crate::speech::{Heard, ListenerThread, Talked, TalkerThread};
 const TICK: Duration = Duration::from_millis(10);
 
 /// Line samples kept waiting for each sound card: enough to ride out a late
-/// tick, little enough not to add delay anyone notices.
-const RADIO_AHEAD: usize = 2400;
-const SPEAKER_AHEAD: usize = 1600;
+/// tick, little enough not to add delay anyone notices -- 100 ms for the
+/// radio and 60 ms for the speaker. With the codecs off this thread the loop
+/// is never late by more than a tick or two.
+const RADIO_AHEAD: usize = 1600;
+const SPEAKER_AHEAD: usize = 960;
 
 /// Symbols the modulator is left with before the next codeword is built:
-/// a slot's worth, so a codeword carries speech right up to the moment it
-/// has to go.
-const SYMBOLS_AHEAD: usize = SLOT + 16;
+/// half a slot, so a codeword carries speech right up to the moment it has to
+/// go, and still four ticks' warning at 1600 baud.
+const SYMBOLS_AHEAD: usize = SLOT / 2;
+
+/// Codewords' worth of speech a live talker may be behind before the oldest
+/// of it is dropped, silence or not.
+const BEHIND_CODEWORDS: usize = 3;
 
 /// Log lines kept.
 const LOG: usize = 200;
@@ -361,7 +367,10 @@ impl Engine {
         self.talker.start(self.mode);
         self.modulator.set_profile(self.mode.profile);
         self.modulator.set_level(self.level);
-        self.tx = Some(VoiceTx::new(self.mode, crate::cli::stream_id(), &self.text));
+        self.tx = Some(
+            VoiceTx::new(self.mode, crate::cli::stream_id(), &self.text)
+                .with_cap(BEHIND_CODEWORDS * self.mode.frames_per_codeword()),
+        );
         self.finishing = false;
         self.say(format!("transmitting {}", self.mode.name));
     }
@@ -413,7 +422,7 @@ impl Engine {
                 Talked::Frames(frames) => {
                     if let Some(tx) = &mut self.tx {
                         for frame in frames {
-                            tx.push_frame(frame);
+                            tx.push_spoken(frame.bits, frame.quiet);
                         }
                     }
                 }

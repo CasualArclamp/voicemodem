@@ -100,9 +100,10 @@ impl Profile {
         symbols as f64 / self.baud()
     }
 
-    /// Seconds a burst of `codewords` takes on the line.
-    pub fn burst_seconds(self, codewords: usize) -> f64 {
-        self.seconds(burst_symbols(codewords))
+    /// Seconds a burst of `codewords` codewords of `slots` slots takes on
+    /// the line.
+    pub fn burst_seconds(self, codewords: usize, slots: usize) -> f64 {
+        self.seconds(burst_symbols(codewords, slots))
     }
 }
 
@@ -138,10 +139,11 @@ pub const CODEWORD_SYMBOLS: usize = DATA * SLOTS_PER_CODEWORD;
 /// preamble, or lost one burst, is back within seconds.
 pub const MAX_CODEWORDS: usize = 32;
 
-/// Symbols in a burst of `codewords`: preamble, slots, and the closing
-/// pilot that confirms the last slot's alignment.
-pub fn burst_symbols(codewords: usize) -> usize {
-    PREAMBLE + codewords * SLOTS_PER_CODEWORD * SLOT + PILOT
+/// Symbols in a burst of `codewords` codewords of `slots` slots each:
+/// preamble, slots, and the closing pilot that confirms the last slot's
+/// alignment.
+pub fn burst_symbols(codewords: usize, slots: usize) -> usize {
+    PREAMBLE + codewords * slots * SLOT + PILOT
 }
 
 #[cfg(test)]

@@ -256,7 +256,7 @@ pub fn decode(soft: &[f64], inputs: usize, rate: Rate) -> Vec<u8> {
 /// burst of noise, the three bits of one 8PSK symbol -- lands on code bits
 /// spread right across the codeword, where the Viterbi decoder sees them as
 /// scattered and not as a hole.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interleaver {
     map: Vec<usize>,
 }
