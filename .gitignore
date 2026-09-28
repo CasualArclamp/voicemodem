@@ -1,0 +1,6 @@
+target/
+dist/
+captures/
+*.wav
+# Meta's EnCodec weights are CC-BY-NC and are never committed.
+*.safetensors

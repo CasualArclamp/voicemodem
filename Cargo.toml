@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/app", "crates/dsp", "crates/line", "crates/modem", "crates/voice"]
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2024"
+license    = "GPL-3.0-or-later"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code                   = "deny"
+
+[profile.release]
+opt-level = 3
+lto       = "thin"
+# Nothing reads a backtrace out of a shipped build, and the symbols are most of
+# the file.
+strip     = true
+
+# The receiver runs every sample through a least-squares trained equaliser and
+# a Viterbi decoder; unoptimised, the end-to-end tests take minutes instead of
+# seconds. Debug assertions and overflow checks stay on.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

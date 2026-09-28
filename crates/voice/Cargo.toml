@@ -1,0 +1,27 @@
+[package]
+name    = "voice"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[features]
+default = ["neural"]
+# Meta's EnCodec, run by candle: pure Rust, CPU only. The weights are not
+# part of the program; see encodec.rs for where they are looked for.
+neural = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+
+[dependencies]
+dsp    = { path = "../dsp" }
+modem  = { path = "../modem" }
+# David Rowe's Codec 2, as a pure-Rust port: no C, so the program stays one
+# static file. LGPL-2.1, which a GPL-3.0 program may include.
+codec2 = "0.3.1"
+candle-core         = { version = "=0.9.1", optional = true }
+candle-nn           = { version = "=0.9.1", optional = true }
+candle-transformers = { version = "=0.9.1", optional = true }
+
+[dev-dependencies]
+line = { path = "../line" }
+
+[lints]
+workspace = true

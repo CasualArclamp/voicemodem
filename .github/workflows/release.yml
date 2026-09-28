@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: voicemodem.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Build
+        run: cargo build --release -p app
+
+      # "Standalone" as a measurement rather than a claim. .cargo/config.toml
+      # links the C runtime in, so the only imports should be Windows itself;
+      # if that ever stops working the file starts naming vcruntime140.dll and
+      # a machine that has never had a developer tool on it answers a
+      # double-click with a dialog about a DLL.
+      - name: No C runtime dependency
+        shell: pwsh
+        run: |
+          $exe = "target/release/voicemodem.exe"
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
+              ForEach-Object { $_.Value.ToLower() } |
+              Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
+              Sort-Object -Unique
+          if ($runtime) {
+              Write-Host "::error::imports a C runtime: $($runtime -join ', ')"
+              exit 1
+          }
+          "{0:N1} MB, no C runtime dependency" -f ((Get-Item $exe).Length / 1MB)
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/voicemodem.exe dist/voicemodem.exe
+          (Get-FileHash dist/voicemodem.exe -Algorithm SHA256).Hash.ToLower() +
+              "  voicemodem.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicemodem-windows-x86_64
+          path: dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+              dist/voicemodem.exe dist/SHA256SUMS.txt `
+              --title "${{ github.ref_name }}" `
+              --notes-file .github/release-notes.md
