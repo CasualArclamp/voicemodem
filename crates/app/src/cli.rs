@@ -126,8 +126,8 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
 
 fn modes() {
     println!(
-        "{:<16} {:<13} {:<10} {:<13} {:>9} {:>8}  {}",
-        "mode", "profile", "modem", "codec", "latency", "frames", "here"
+        "{:<16} {:<13} {:<10} {:<13} {:>9} {:>8}  here",
+        "mode", "profile", "modem", "codec", "latency", "frames"
     );
     let mut missing = None;
     for m in &VOICE_MODES {
