@@ -88,7 +88,7 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dsp",
  "eframe",
@@ -652,7 +652,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dsp"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "dyn-stack"
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "line"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cpal",
  "dsp",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "modem"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dsp",
 ]
@@ -3229,7 +3229,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voice"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "candle-core",
  "candle-nn",
