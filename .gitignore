@@ -1,5 +1,7 @@
 target/
 dist/
+# Claude Code's worktrees for its sub-agents live here while they work.
+.claude/
 captures/
 *.wav
 # Meta's EnCodec weights are CC-BY-NC and are never committed.
