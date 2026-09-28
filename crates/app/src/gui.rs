@@ -299,7 +299,15 @@ impl VoiceApp {
             ui.label(format!("{} heard, {} lost", v.heard, v.lost));
             ui.end_row();
             ui.label("text");
-            ui.label(RichText::new(&v.text).monospace());
+            // The listener keeps 64 characters, more than the panel has room
+            // for, so the row shows the last 16, which move along like a
+            // ticker as each codeword brings another. What has scrolled off
+            // is still there to read, by hovering.
+            let shown = last_chars(&v.text, 16);
+            let row = ui.label(RichText::new(shown).monospace());
+            if shown.len() < v.text.len() {
+                row.on_hover_text(RichText::new(&v.text).monospace());
+            }
             ui.end_row();
         });
         meter(ui, "radio", v.rx_level_dbfs);
@@ -402,6 +410,15 @@ fn meter(ui: &mut Ui, label: &str, dbfs: f64) {
         painter.rect_filled(Rect::from_min_size(rect.min, vec2(rect.width() * t, rect.height())), 2.0, colour);
         ui.label(RichText::new(format!("{dbfs:>5.0} dB")).monospace().small());
     });
+}
+
+/// The last `n` characters of `text`, or all of it when it is shorter. It
+/// counts characters rather than bytes: the transmitter sends only printable
+/// ASCII, but the listener makes a character of each byte it hears, and one
+/// from 0x80 up is two bytes in the string; slicing between those would panic.
+fn last_chars(text: &str, n: usize) -> &str {
+    let start = text.char_indices().rev().take(n).last().map_or(text.len(), |(i, _)| i);
+    &text[start..]
 }
 
 fn allocate(ui: &mut Ui, size: egui::Vec2) -> (Rect, Painter) {
@@ -530,4 +547,38 @@ fn spectrum(ui: &mut Ui, bins: &[f32], hz_per_bin: f64, height: f32, profile: Pr
     }
     painter.text(rect.right_top() + vec2(-4.0, 4.0), Align2::RIGHT_TOP, "radio audio", FontId::monospace(10.0), LABEL);
     border(&painter, rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_text_comes_back_whole() {
+        assert_eq!(last_chars("N0CALL", 16), "N0CALL");
+        assert_eq!(last_chars("de N0CALL N0CALL", 16), "de N0CALL N0CALL");
+    }
+
+    #[test]
+    fn a_long_text_comes_back_as_its_last_sixteen() {
+        assert_eq!(last_chars("CQ CQ CQ de N0CALL N0CALL", 16), "de N0CALL N0CALL");
+    }
+
+    #[test]
+    fn characters_of_more_than_one_byte_are_kept_whole() {
+        // Two bytes a character, as the listener makes of bytes from 0x80 up,
+        // and then three and four. In each text a character straddles the
+        // point sixteen bytes from the end, where a slice by bytes would panic.
+        for (text, last) in [("Grüße aus Köln! 73", "üße aus Köln! 73"), ("1€2𝄞3€4𝄞5€6𝄞7€8𝄞9€", "2𝄞3€4𝄞5€6𝄞7€8𝄞9€")] {
+            assert!(!text.is_char_boundary(text.len() - 16));
+            assert_eq!(last_chars(text, 16), last);
+        }
+    }
+
+    #[test]
+    fn an_empty_text_comes_back_empty() {
+        assert_eq!(last_chars("", 16), "");
+        // As does any text when no characters are asked for.
+        assert_eq!(last_chars("N0CALL", 0), "");
+    }
 }
