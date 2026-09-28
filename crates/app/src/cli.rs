@@ -11,6 +11,7 @@ use voice::{Listener, Rate, Talker};
 
 pub const USAGE: &str = "\
 voicemodem                                   the window: talk and listen through a radio
+voicemodem demo                              the window on the loopback, talking to itself
 voicemodem tx <speech.wav> <out.wav> [opts]  speech to the modem's audio, as a recording
 voicemodem rx <in.wav> [speech.wav]          a recording of the modem back to speech
 voicemodem selftest [opts]                   speech through a simulated radio channel

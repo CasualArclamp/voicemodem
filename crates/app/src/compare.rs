@@ -73,8 +73,12 @@ fn spectra(x: &[f32], starts: &[usize], low: usize, high: usize) -> Vec<Vec<f64>
 /// `b` against `a`, both at the modem's rate.
 pub fn compare(a: &[f32], b: &[f32]) -> Comparison {
     let (ea, eb) = (envelope(a), envelope(b));
-    // Where the envelopes line up: b lagging a by `lag` points.
-    let most = (3.0 * FS / POINT as f64) as i64;
+    // Where the envelopes line up: b lagging a by `lag` points, within eight
+    // seconds -- a codec and a modem between them can add a few -- and with
+    // at least half the shorter recording overlapping, since a few points
+    // at the very ends can correlate perfectly by chance.
+    let most = (8.0 * FS / POINT as f64) as i64;
+    let least = (ea.len().min(eb.len()) / 2).max(2);
     let score = |lag: i64| {
         let (x, y): (&[f64], &[f64]) = if lag >= 0 {
             let l = lag as usize;
@@ -83,7 +87,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Comparison {
             let l = (-lag) as usize;
             (ea.get(l..).unwrap_or(&[]), &eb[..eb.len().min(ea.len().saturating_sub(l))])
         };
-        correlation(x, y)
+        if x.len().min(y.len()) < least { f64::MIN } else { correlation(x, y) }
     };
     let (lag, envelope) = (-most..=most).map(|l| (l, score(l))).max_by(|p, q| p.1.total_cmp(&q.1)).unwrap_or((0, 0.0));
     let shift = lag * POINT as i64;

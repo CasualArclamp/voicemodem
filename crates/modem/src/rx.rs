@@ -61,6 +61,10 @@ const LEAST_TRAINED_DB: f64 = 1.0;
 /// a detector bank to find it too: three symbols narrow.
 const HOLD: u64 = 30;
 
+/// Points kept for a display: 128 on each point of 8PSK, the scope's last
+/// half second or so.
+const DISPLAY: usize = 1024;
+
 /// What the receiver has to say.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -141,7 +145,9 @@ pub struct Receiver {
     level: f64,
     /// Preambles heard while a burst was being read, and ignored.
     ignored: u64,
-    last_points: Vec<Complex>,
+    /// Points for a display, across bursts, and their modulation.
+    display: VecDeque<Complex>,
+    display_modulation: Option<Modulation>,
     /// Preambles found and not yet acted on, and when to act on them.
     pending: Vec<Found>,
     pending_until: u64,
@@ -170,7 +176,8 @@ impl Receiver {
             events: VecDeque::new(),
             level: 0.0,
             ignored: 0,
-            last_points: Vec::new(),
+            display: VecDeque::with_capacity(DISPLAY),
+            display_modulation: None,
             pending: Vec::new(),
             pending_until: 0,
         }
@@ -215,18 +222,32 @@ impl Receiver {
         self.burst.as_ref().filter(|a| a.trained).map(|a| a.core.drift_ppm())
     }
 
-    /// The most recent data points, turned the right way round: the burst
-    /// being read's, or the last one's.
+    /// The most recent data points, turned the right way round, oldest
+    /// first. They carry on from one burst to the next, so that a display
+    /// of them builds up rather than starting again at every preamble; only
+    /// a change of modulation clears them.
     pub fn points(&self) -> Vec<Complex> {
-        match &self.burst {
-            Some(a) if a.trained => a.framer.points().copied().collect(),
-            _ => self.last_points.clone(),
-        }
+        self.display.iter().copied().collect()
     }
 
-    /// The modulation of the burst being read.
+    /// The modulation the points are in: the last burst's.
     pub fn modulation(&self) -> Option<Modulation> {
-        self.burst.as_ref().map(|a| a.geometry.modulation)
+        self.display_modulation
+    }
+
+    /// Take a burst's newest points into the display.
+    fn show_points(&mut self, active: &mut Active) {
+        let modulation = active.geometry.modulation;
+        if self.display_modulation != Some(modulation) {
+            self.display.clear();
+            self.display_modulation = Some(modulation);
+        }
+        for z in active.framer.take_points() {
+            if self.display.len() >= DISPLAY {
+                self.display.pop_front();
+            }
+            self.display.push_back(z);
+        }
     }
 
     /// The blocks of transfer `id` still missing, if it is remembered.
@@ -460,6 +481,7 @@ impl Receiver {
 
     /// Pass on what the framer has to say.
     fn framed(&mut self, active: &mut Active) {
+        self.show_points(active);
         let header = active.found.header;
         while let Some(event) = active.framer.next_event() {
             match event {
@@ -505,7 +527,6 @@ impl Receiver {
     }
 
     fn end_burst(&mut self, active: &Active, aborted: bool) {
-        self.last_points = active.framer.points().copied().collect();
         self.events.push_back(Event::BurstEnd(BurstReport {
             profile: active.found.profile,
             header: active.found.header,

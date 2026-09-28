@@ -10,14 +10,18 @@ mod compare;
 mod engine;
 mod gui;
 mod settings;
+mod speech;
 
 use modem::{Profile, VoiceMode};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match cli::run(&args) {
-        Some(result) => result,
-        None => window(),
+    let result = match args.first().map(String::as_str) {
+        Some("demo") => window(true),
+        _ => match cli::run(&args) {
+            Some(result) => result,
+            None => window(false),
+        },
     };
     if let Err(e) = result {
         eprintln!("voicemodem: {e}");
@@ -25,7 +29,8 @@ fn main() {
     }
 }
 
-fn window() -> Result<(), String> {
+/// The window; in a demonstration, on the loopback and talking to itself.
+fn window(demo: bool) -> Result<(), String> {
     let settings = settings::Settings::load();
     let mode = VoiceMode::by_name(&settings.mode).unwrap_or(VoiceMode::robust(Profile::Narrow));
     let (commands, status) = engine::spawn(mode);
@@ -43,7 +48,7 @@ fn window() -> Result<(), String> {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
-            Ok(Box::new(gui::VoiceApp::new(commands, status, settings)))
+            Ok(Box::new(gui::VoiceApp::new(commands, status, settings, demo)))
         }),
     );
     let _ = quit.send(engine::Command::Quit);

@@ -1,3 +1,5 @@
-- **Fixed:** the neural modes were labelled "(not yet)" in the mode list, even though EnCodec works.
-- The list now says "(needs weights)" only when Meta's EnCodec weights aren't found, and hovering over it says where to put them.
-- `voicemodem modes` has a new column showing whether each mode can be used on this machine.
+- **Fixed: the neural modes lagged and played nothing.** EnCodec ran on the real-time audio thread and stalled it for a sixth of a second at a time, which put holes in the transmission. Both codecs now run on threads of their own.
+- **Fixed: received speech dropped out after every preamble.** The receiver now buffers enough to cover the preamble's gap.
+- **The constellation looks like BinModem's.** It has a black scope with blue axes, and the points build up into clusters, with Es/N0 shown in a margin colour. Click it to draw it large.
+- **The constellation no longer resets at every burst.** It carries on across bursts and starts again only when the modulation changes.
+- **New: `voicemodem demo`** opens the window on the loopback, talking to itself.

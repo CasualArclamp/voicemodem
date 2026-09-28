@@ -21,6 +21,14 @@ projects by diff.
    the whole modem, at whatever SNR the slider sets. This is the quickest way
    to hear what each mode and codec does before going on the air.
 
+`voicemodem demo` does the same with no microphone. It opens the loopback
+and talks to itself with synthetic speech for ten seconds of every fifteen,
+so the scopes have something to show.
+
+Click the constellation to draw it large. It is drawn the way BinModem draws
+one, and it builds up across bursts, starting again only when the modulation
+changes.
+
 On the air, choose the rig's audio interface as **radio in** and **radio out**
 and untick loopback. Key the rig with VOX or by hand. PTT through a serial
 line or CAT is not built in yet.
@@ -51,7 +59,14 @@ once and follows whichever it hears.
 "Every codeword at" is the Es/N0 at which a 30 s transmission lost no
 codewords, measured with `voicemodem selftest`. The neural rows reuse the
 figure of their modem, since the codec does not change the modem. A lost
-codeword is played as silence. Mouth-to-ear delay is about two codewords.
+codeword is played as silence.
+
+Mouth-to-ear delay, measured through the live engine with `voicemodem loop`,
+is about 2.4 s narrow and 1.7 s wide with Codec 2, and 0.1 s more with
+EnCodec. Most of it is the price of long, well-interleaved codewords: a
+codeword is sent only once its speech has been spoken, and played only once
+it has all arrived. The receiver also holds back enough speech to ride out
+the next burst's preamble.
 
 Narrow has no BPSK voice mode. At 1600 baud, BPSK nets at most 1050 bit/s
 once the pilots are paid for, and Codec2's lowest rate in Rust is 1200. The
@@ -163,7 +178,9 @@ voicemodem tx <speech.wav> <out.wav> [opts]  speech to the modem's audio, as a r
 voicemodem rx <in.wav> [speech.wav]          a recording of the modem back to speech
 voicemodem selftest [opts]                   speech through a simulated radio channel
 voicemodem loop [opts]                       the same in real time, through the live engine
-voicemodem modes                             the voice modes
+voicemodem compare <a.wav> <b.wav>           how far the second recording strays from the first
+voicemodem demo                              the window on the loopback, talking to itself
+voicemodem modes                             the voice modes, and which can be used here
 voicemodem devices                           the audio devices this machine has
 ```
 

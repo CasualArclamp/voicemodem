@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align2, Color32, FontId, Painter, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2,
@@ -17,8 +17,6 @@ const BACKDROP: Color32 = Color32::from_rgb(12, 14, 18);
 const GRID: Color32 = Color32::from_rgb(40, 46, 56);
 const TRACE: Color32 = Color32::from_rgb(120, 220, 160);
 const LABEL: Color32 = Color32::from_rgb(150, 160, 175);
-const POINT: Color32 = Color32::from_rgba_premultiplied(120, 200, 255, 110);
-const IDEAL: Color32 = Color32::from_rgb(240, 170, 90);
 const ON_AIR: Color32 = Color32::from_rgb(190, 40, 40);
 
 /// Width of the station panel on the left.
@@ -38,7 +36,16 @@ pub struct VoiceApp {
     /// latch's state when latching.
     keyed: bool,
     latched_on: bool,
+    /// Whether the constellation is also drawn large, in a window of its own.
+    constellation_open: bool,
+    /// A demonstration: when it started, and whether it is talking now.
+    demo: Option<Instant>,
+    demo_talking: bool,
 }
+
+/// A demonstration talks for this long in every cycle of this long.
+const DEMO_TALK: f64 = 10.0;
+const DEMO_CYCLE: f64 = 15.0;
 
 impl std::fmt::Debug for VoiceApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,7 +54,8 @@ impl std::fmt::Debug for VoiceApp {
 }
 
 impl VoiceApp {
-    pub fn new(commands: Sender<Command>, status: Arc<Mutex<Status>>, settings: Settings) -> Self {
+    /// The window; with `demo`, on the loopback, talking to itself.
+    pub fn new(commands: Sender<Command>, status: Arc<Mutex<Status>>, settings: Settings, demo: bool) -> Self {
         let app = Self {
             commands,
             status,
@@ -57,12 +65,37 @@ impl VoiceApp {
             outputs: line::output_devices(),
             keyed: false,
             latched_on: false,
+            constellation_open: false,
+            demo: demo.then(Instant::now),
+            demo_talking: false,
         };
         app.send(Command::Mode(app.mode()));
         app.send(Command::Text(app.settings.text.clone()));
         app.send(Command::Level(app.settings.level));
         app.send(Command::FullDuplex(app.settings.full_duplex));
+        if demo {
+            // The loopback, and the mic and speaker if they have been chosen:
+            // with no speaker it is still something to look at.
+            let operator = (!app.settings.mic.is_empty() && !app.settings.speaker.is_empty())
+                .then(|| (app.settings.mic.clone(), app.settings.speaker.clone()));
+            app.send(Command::Open { radio: None, loopback_snr: app.settings.loopback_snr, operator });
+        }
         app
+    }
+
+    /// A demonstration's next move: synthetic speech for [`DEMO_TALK`]
+    /// seconds of every [`DEMO_CYCLE`].
+    fn demonstrate(&mut self) {
+        let Some(started) = self.demo else { return };
+        let into = started.elapsed().as_secs_f64() % DEMO_CYCLE;
+        let talk = (0.5..0.5 + DEMO_TALK).contains(&into);
+        if talk && !self.demo_talking {
+            self.send(Command::Speak(voice::synthetic_speech(DEMO_TALK, modem::profile::FS)));
+            self.send(Command::Ptt(true));
+        } else if !talk && self.demo_talking {
+            self.send(Command::Ptt(false));
+        }
+        self.demo_talking = talk;
     }
 
     fn send(&self, command: Command) {
@@ -269,14 +302,47 @@ impl VoiceApp {
         meter(ui, "radio", v.rx_level_dbfs);
     }
 
-    fn scopes(&self, ui: &mut Ui) {
+    /// What the scope says along its bottom, and how good the signal is on a
+    /// scale of nought to one, if it has been measured.
+    fn scope_label(&self) -> (String, Option<f32>) {
+        let v = &self.view;
+        let what = v.modulation.map_or("", |m| m.label());
+        match (v.modulation, v.scope_snr_db) {
+            (Some(m), Some(snr)) => {
+                // Against what the modulation needs: red at its threshold,
+                // green ten decibels above it.
+                let need = match m.bits() {
+                    1 => 4.0,
+                    2 => 7.0,
+                    _ => 12.0,
+                };
+                (format!("{what}  Es/N0 {snr:.1} dB"), Some(((snr - need) / 10.0).clamp(0.0, 1.0) as f32))
+            }
+            _ => (what.to_string(), None),
+        }
+    }
+
+    fn scopes(&mut self, ui: &mut Ui) {
         let height = (ui.available_height() * 0.5).clamp(180.0, 420.0);
+        let (label, quality) = self.scope_label();
         ui.horizontal(|ui| {
-            constellation(ui, &self.view.points, self.view.modulation_points, height);
+            let scope = symbol_scope(ui, &self.view.points, &label, quality, height);
+            if scope.on_hover_text("Click to draw it large").clicked() {
+                self.constellation_open = !self.constellation_open;
+            }
             ui.vertical(|ui| {
                 spectrum(ui, &self.view.spectrum, self.view.hz_per_bin, height, self.mode().profile);
             });
         });
+        let mut open = self.constellation_open;
+        egui::Window::new("constellation").open(&mut open).resizable(true).default_size([620.0, 640.0]).show(
+            ui.ctx(),
+            |ui| {
+                let side = ui.available_width().min(ui.available_height()).max(240.0);
+                symbol_scope(ui, &self.view.points, &label, quality, side);
+            },
+        );
+        self.constellation_open = open;
         ui.add_space(6.0);
         ui.label(RichText::new("log").strong());
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
@@ -293,6 +359,7 @@ impl eframe::App for VoiceApp {
             self.view = status.clone();
         }
         ui.ctx().request_repaint_after(Duration::from_millis(50));
+        self.demonstrate();
 
         egui::Panel::top("lines").show(ui, |ui| {
             ui.add_space(4.0);
@@ -343,25 +410,71 @@ fn border(painter: &Painter, rect: Rect) {
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Inside);
 }
 
-/// The received points, with the constellation's own points marked.
-fn constellation(ui: &mut Ui, points: &[[f32; 2]], ideal: usize, size: f32) {
-    let (rect, painter) = allocate(ui, vec2(size, size));
-    painter.rect_filled(rect, 0.0, BACKDROP);
+/// The receiver's points, drawn as BinModem draws a constellation
+/// (`crates/gui/src/scopes.rs`, `symbol_scope`): blue axes, a tick at each
+/// arm tip where an ideal symbol lands, and every symbol a small faint
+/// square, one colour, so that the symbols landing on a point build up into
+/// it as one mesh rather than thousands of shapes. What a reader wants from
+/// it is the shape of the clusters, and that is what building up shows.
+fn symbol_scope(ui: &mut Ui, points: &[[f32; 2]], label: &str, quality: Option<f32>, size: f32) -> egui::Response {
+    let (response, painter) = ui.allocate_painter(vec2(size, size), Sense::click());
+    let rect = response.rect;
+    painter.rect_filled(rect, 0.0, Color32::BLACK);
+
     let centre = rect.center();
-    let scale = size / 3.2;
-    let at = |x: f32, y: f32| pos2(centre.x + x * scale, centre.y - y * scale);
-    painter.line_segment([pos2(rect.left(), centre.y), pos2(rect.right(), centre.y)], Stroke::new(1.0, GRID));
-    painter.line_segment([pos2(centre.x, rect.top()), pos2(centre.x, rect.bottom())], Stroke::new(1.0, GRID));
-    painter.circle_stroke(centre, scale, Stroke::new(1.0, GRID));
+    // Square, so the two axes share a scale.
+    let radius = (rect.width().min(rect.height()) * 0.5) - 12.0;
+    let axis = Color32::from_rgb(70, 130, 200);
+    painter.line_segment([pos2(centre.x - radius, centre.y), pos2(centre.x + radius, centre.y)], Stroke::new(1.5, axis));
+    painter.line_segment([pos2(centre.x, centre.y - radius), pos2(centre.x, centre.y + radius)], Stroke::new(1.5, axis));
+    for dx in [-1.0f32, 1.0] {
+        let x = centre.x + dx * radius;
+        painter.line_segment([pos2(x, centre.y - 5.0), pos2(x, centre.y + 5.0)], Stroke::new(1.0, axis.gamma_multiply(0.8)));
+    }
+
+    // A unit-magnitude symbol sits at the arm tip; PSK's points all do.
+    let at = |re: f32, im: f32| pos2(centre.x + re.clamp(-1.4, 1.4) * radius, centre.y - im.clamp(-1.4, 1.4) * radius);
+    let mut mesh = egui::Mesh::default();
+    let crowded = points.len() > 200;
+    let side = (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 };
+    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if crowded { 110 } else { 150 });
     for p in points {
-        painter.circle_filled(at(p[0], p[1]), 1.6, POINT);
+        mesh.add_colored_rect(Rect::from_center_size(at(p[0], p[1]), vec2(side, side)), colour);
     }
-    for k in 0..ideal {
-        let angle = std::f32::consts::TAU * k as f32 / ideal as f32;
-        painter.circle_stroke(at(angle.cos(), angle.sin()), 4.0, Stroke::new(1.5, IDEAL));
-    }
-    painter.text(rect.left_top() + vec2(4.0, 4.0), Align2::LEFT_TOP, "symbols", FontId::monospace(10.0), LABEL);
+    painter.add(egui::Shape::mesh(mesh));
+
+    // Always say something: a silent, empty scope gives no way to tell a
+    // receiver that is not decoding from a display that is not being fed.
+    let grey = Color32::from_rgb(150, 160, 175);
+    let (text, colour) = match quality {
+        Some(q) => (label.to_string(), margin_colour(q)),
+        None if !points.is_empty() => (format!("{label}  {} points", points.len()), grey),
+        None => (format!("{label}  no symbols").trim_start().to_string(), Color32::from_rgb(120, 100, 100)),
+    };
+    painter.text(pos2(rect.left() + 6.0, rect.bottom() - 4.0), Align2::LEFT_BOTTOM, text, FontId::monospace(11.0), colour);
     border(&painter, rect);
+    response
+}
+
+/// Green at a full margin, through yellow, to red at the threshold: BinModem's
+/// colouring of its quality figure.
+fn margin_colour(margin: f32) -> Color32 {
+    let m = margin.clamp(0.0, 1.0);
+    if m > 0.5 {
+        let t = (m - 0.5) / 0.5;
+        Color32::from_rgb(
+            (255.0 * (1.0 - t) + 60.0 * t) as u8,
+            (215.0 * (1.0 - t) + 230.0 * t) as u8,
+            (60.0 * (1.0 - t) + 90.0 * t) as u8,
+        )
+    } else {
+        let t = m / 0.5;
+        Color32::from_rgb(
+            (235.0 * (1.0 - t) + 255.0 * t) as u8,
+            (60.0 * (1.0 - t) + 215.0 * t) as u8,
+            (55.0 * (1.0 - t) + 60.0 * t) as u8,
+        )
+    }
 }
 
 /// The radio's receive audio, 0 to 4 kHz, with the profile's band marked.

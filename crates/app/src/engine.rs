@@ -24,9 +24,11 @@ use std::time::{Duration, Instant};
 use dsp::Spectrum;
 use line::Duplex;
 use modem::channel::Random;
-use modem::profile::{FS, SLOT};
-use modem::{Event, Modulator, Receiver, State, VoiceMode, VoiceTx};
-use voice::{Listener, Playout, Talker};
+use modem::profile::{FS, PILOT, PREAMBLE, SLOT};
+use modem::{Event, Modulation, Modulator, Receiver, State, VoiceMode, VoiceTx};
+use voice::Playout;
+
+use crate::speech::{Heard, ListenerThread, Talked, TalkerThread};
 
 /// How often the engine wakes.
 const TICK: Duration = Duration::from_millis(10);
@@ -87,8 +89,11 @@ pub struct Status {
     pub heard: usize,
     pub lost: usize,
     pub text: String,
+    /// The receiver's recent points, in the modulation they were sent in,
+    /// and the signal to noise of the burst they came from.
     pub points: Vec<[f32; 2]>,
-    pub modulation_points: usize,
+    pub modulation: Option<Modulation>,
+    pub scope_snr_db: Option<f64>,
     pub spectrum: Vec<f32>,
     pub hz_per_bin: f64,
     pub log: VecDeque<String>,
@@ -127,11 +132,17 @@ struct Engine {
     loopback: Option<Loopback>,
     operator: Option<Duplex>,
     receiver: Receiver,
-    listener: Option<Listener>,
+    /// The codecs, on threads of their own; the mode last heard, and the
+    /// text its transmission carries.
+    listener: ListenerThread,
+    talker: TalkerThread,
+    rx_mode: Option<&'static VoiceMode>,
+    rx_text: String,
     playout: Playout,
     modulator: Modulator,
     tx: Option<VoiceTx>,
-    talker: Option<Talker>,
+    /// The talker has been told to finish and has not yet said it has.
+    finishing: bool,
     mode: &'static VoiceMode,
     text: String,
     level: f64,
@@ -152,6 +163,10 @@ struct Engine {
     /// out, kept while recording.
     script: VecDeque<f32>,
     recording: Option<Vec<f32>>,
+    /// The last signal to noise a burst measured, kept for the scope.
+    scope_snr: Option<f64>,
+    /// Times the speech has run dry, as last said.
+    starved: u64,
 }
 
 /// Start the engine; the handle to talk to it, and where it reports.
@@ -172,11 +187,14 @@ fn run(inbox: Inbox<Command>, status: Arc<Mutex<Status>>, mode: &'static VoiceMo
         loopback: None,
         operator: None,
         receiver: Receiver::default(),
-        listener: None,
+        listener: ListenerThread::spawn(),
+        talker: TalkerThread::spawn(),
+        rx_mode: None,
+        rx_text: String::new(),
         playout: Playout::new(0),
         modulator: Modulator::new(mode.profile, -12.0),
         tx: None,
-        talker: None,
+        finishing: false,
         mode,
         text: String::new(),
         level: -12.0,
@@ -194,6 +212,8 @@ fn run(inbox: Inbox<Command>, status: Arc<Mutex<Status>>, mode: &'static VoiceMo
         started: Instant::now(),
         script: VecDeque::new(),
         recording: None,
+        scope_snr: None,
+        starved: 0,
     };
     engine.set_preroll();
     let mut published = Instant::now();
@@ -222,10 +242,15 @@ impl Engine {
         }
     }
 
-    /// Enough speech gathered before playing to ride out a codeword's wait.
+    /// Enough speech gathered before playing to ride out the longest wait
+    /// for more: a codeword's air time, and the next burst's preamble on top
+    /// of it, which is air time that carries no speech. With one codeword's
+    /// worth, the speech ran dry at every preamble.
     fn set_preroll(&mut self) {
-        let seconds = self.listener.as_ref().map_or(self.mode, |l| l.mode()).codeword_seconds();
+        let mode = self.rx_mode.unwrap_or(self.mode);
+        let seconds = mode.codeword_seconds() + mode.profile.seconds(PREAMBLE + PILOT) + 0.1;
         self.playout = Playout::new((seconds * FS) as usize);
+        self.starved = 0;
     }
 
     fn command(&mut self, command: Command) {
@@ -248,12 +273,11 @@ impl Engine {
             Command::Mode(mode) => {
                 self.mode = mode;
                 self.say(format!("transmit mode {}", mode.name));
-                // Open the codec now, so that a neural codec's weights are
-                // loaded before the first transmission rather than during it,
-                // and a codec that cannot be used says so at once.
-                if let Err(e) = voice::open(mode.codec) {
-                    self.say(format!("{} cannot be used: {e}", mode.codec.label()));
-                }
+                // Open the codec now, on the listener's thread, so that a
+                // neural codec's weights are loaded before the first
+                // transmission rather than during it, and a codec that cannot
+                // be used says so at once.
+                self.listener.warm(mode.codec);
             }
             Command::Text(text) => self.text = text,
             Command::Level(level) => {
@@ -304,16 +328,12 @@ impl Engine {
         self.ptt = down;
         if !down {
             self.rekeyed = false;
-            if let Some(tx) = &mut self.tx {
-                // The last words, still in the codec, go out before the end.
-                if let Some(talker) = &mut self.talker {
-                    let mut frames = Vec::new();
-                    talker.finish(&mut frames);
-                    for frame in frames {
-                        tx.push_frame(frame);
-                    }
-                }
-                tx.end();
+            if self.tx.is_some() && !self.finishing {
+                // The last words, still in the codec, go out before the end:
+                // the transmission ends when the talker says it has handed
+                // them all back.
+                self.talker.finish();
+                self.finishing = true;
             }
             return;
         }
@@ -326,16 +346,12 @@ impl Engine {
     }
 
     fn start_transmission(&mut self) {
-        match Talker::new(self.mode, FS) {
-            Ok(talker) => {
-                self.talker = Some(talker);
-                self.modulator.set_profile(self.mode.profile);
-                self.modulator.set_level(self.level);
-                self.tx = Some(VoiceTx::new(self.mode, crate::cli::stream_id(), &self.text));
-                self.say(format!("transmitting {}", self.mode.name));
-            }
-            Err(e) => self.say(format!("cannot transmit: {e}")),
-        }
+        self.talker.start(self.mode);
+        self.modulator.set_profile(self.mode.profile);
+        self.modulator.set_level(self.level);
+        self.tx = Some(VoiceTx::new(self.mode, crate::cli::stream_id(), &self.text));
+        self.finishing = false;
+        self.say(format!("transmitting {}", self.mode.name));
     }
 
     fn tick(&mut self) {
@@ -376,13 +392,35 @@ impl Engine {
             let db = 10.0 * (2.0 * power).max(1e-12).log10();
             self.mic_level += 0.3 * (db - self.mic_level);
         }
-        if self.ptt
-            && let (Some(talker), Some(tx)) = (&mut self.talker, &mut self.tx)
-        {
-            let mut frames = Vec::new();
-            talker.speak(&mic, &mut frames);
-            for frame in frames {
-                tx.push_frame(frame);
+        if self.ptt && self.tx.is_some() && !self.finishing {
+            self.talker.speak(mic);
+        }
+        // Whatever the codecs have finished since the last tick.
+        for done in self.talker.done() {
+            match done {
+                Talked::Frames(frames) => {
+                    if let Some(tx) = &mut self.tx {
+                        for frame in frames {
+                            tx.push_frame(frame);
+                        }
+                    }
+                }
+                Talked::Finished => {
+                    self.finishing = false;
+                    if let Some(tx) = &mut self.tx {
+                        tx.end();
+                    }
+                }
+                Talked::Failed(e) => self.say(format!("cannot transmit: {e}")),
+            }
+        }
+        for done in self.listener.done() {
+            match done {
+                Heard::Speech(speech, text) => {
+                    self.playout.push(&speech);
+                    self.rx_text = text;
+                }
+                Heard::Failed(e) => self.say(e),
             }
         }
 
@@ -431,6 +469,10 @@ impl Engine {
             }
             None => self.playout.pull(input.len(), &mut out),
         }
+        if self.playout.starved > self.starved {
+            self.starved = self.playout.starved;
+            self.say("the speech ran dry and waited for more");
+        }
         if let Some(recording) = &mut self.recording {
             recording.extend_from_slice(&out);
         }
@@ -444,28 +486,16 @@ impl Engine {
             }
             Event::Untrained { .. } => self.say("a preamble, but the equaliser would not train on it"),
             Event::Voice { mode, codeword, .. } => {
-                if self.listener.as_ref().is_none_or(|l| l.mode() != mode) {
-                    match Listener::new(mode, FS) {
-                        Ok(l) => {
-                            self.listener = Some(l);
-                            self.set_preroll();
-                        }
-                        Err(e) => {
-                            self.say(format!("cannot play {}: {e}", mode.name));
-                            self.listener = None;
-                        }
-                    }
+                if self.rx_mode != Some(mode) {
+                    self.rx_mode = Some(mode);
+                    self.set_preroll();
                 }
                 if codeword.is_some() {
                     self.heard += 1;
                 } else {
                     self.lost += 1;
                 }
-                if let Some(listener) = &mut self.listener {
-                    let mut speech = Vec::new();
-                    listener.hear(codeword.as_ref(), &mut speech);
-                    self.playout.push(&speech);
-                }
+                self.listener.hear(mode, codeword);
             }
             Event::BurstEnd(r) => {
                 self.say(format!(
@@ -486,6 +516,9 @@ impl Engine {
     }
 
     fn publish(&mut self) {
+        if let Some(snr) = self.receiver.snr_db() {
+            self.scope_snr = Some(snr);
+        }
         let receiving = match self.receiver.state() {
             State::Listening => "listening".to_string(),
             State::Training(p, _) => format!("training on a {} preamble", p.name()),
@@ -513,7 +546,7 @@ impl Engine {
             transmitting: self.tx.is_some(),
             behind,
             receiving,
-            rx_mode: self.listener.as_ref().map(Listener::mode),
+            rx_mode: self.rx_mode,
             snr_db: self.receiver.snr_db(),
             offset_hz: self.receiver.offset_hz(),
             drift_ppm: self.receiver.drift_ppm(),
@@ -521,9 +554,10 @@ impl Engine {
             mic_level_dbfs: self.mic_level,
             heard: self.heard,
             lost: self.lost,
-            text: self.listener.as_ref().map(Listener::text).unwrap_or_default(),
-            modulation_points: self.receiver.modulation().map_or(0, |m| m.points()),
+            text: self.rx_text.clone(),
+            modulation: self.receiver.modulation(),
             points,
+            scope_snr_db: self.scope_snr,
             spectrum,
             hz_per_bin: FS / self.spectrum.size() as f64,
             log: self.log.clone(),

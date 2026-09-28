@@ -93,12 +93,12 @@ pub struct Framer {
     give_up: usize,
     done: bool,
     out: VecDeque<Framed>,
-    /// Data points as they were decided, the constellation's turn taken out,
-    /// for a display.
-    points: VecDeque<Complex>,
+    /// Data points demapped since they were last taken, the constellation's
+    /// turn taken out, for a display.
+    points: Vec<Complex>,
 }
 
-/// Points kept for a display.
+/// Points kept for a display that nothing is taking.
 const POINTS: usize = 2048;
 
 impl Framer {
@@ -122,7 +122,7 @@ impl Framer {
             give_up,
             done: false,
             out: VecDeque::new(),
-            points: VecDeque::with_capacity(POINTS),
+            points: Vec::new(),
         }
     }
 
@@ -147,9 +147,10 @@ impl Framer {
         -10.0 * self.noise.log10()
     }
 
-    /// The most recent data points, turned as the pilots say.
-    pub fn points(&self) -> impl Iterator<Item = &Complex> {
-        self.points.iter()
+    /// The data points demapped since the last call, turned as the pilots
+    /// say.
+    pub fn take_points(&mut self) -> Vec<Complex> {
+        std::mem::take(&mut self.points)
     }
 
     pub fn pilots(&self) -> &[Pilot] {
@@ -297,9 +298,10 @@ impl Framer {
                 let z = self.point(start + i) * spin;
                 modulation.demap(z, self.noise, &mut self.soft);
                 if self.points.len() >= POINTS {
-                    self.points.pop_front();
+                    // Nothing is taking them; keep the newest.
+                    self.points.drain(..DATA);
                 }
-                self.points.push_back(z);
+                self.points.push(z);
             }
         } else {
             self.soft.extend(std::iter::repeat_n(0.0, DATA * modulation.bits()));

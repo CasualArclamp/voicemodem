@@ -140,6 +140,35 @@ fn a_far_sound_card_clock_is_followed() {
 }
 
 #[test]
+fn the_display_keeps_its_points_from_one_burst_to_the_next() {
+    // Two transmissions: QPSK over several bursts, then 8PSK.
+    let qpsk = VoiceMode::robust(Profile::Narrow);
+    let psk8 = VoiceMode::by_name("narrow-high").unwrap();
+    let mut bursts = vec![transmission(qpsk, &frames(qpsk, (14.0 / qpsk.codec.frame_seconds()) as usize, 1))];
+    bursts.push(transmission(psk8, &frames(psk8, (3.0 / psk8.codec.frame_seconds()) as usize, 2)));
+    let samples = line(Profile::Narrow, &bursts);
+    let mut rx = modem::Receiver::new(&Profile::ALL);
+    let mut heard_with_points = Vec::new();
+    for &x in &samples {
+        rx.feed(x);
+        while let Some(e) = rx.event() {
+            if let Event::Heard { header, .. } = e {
+                heard_with_points.push((header.modulation, rx.points().len()));
+            }
+        }
+    }
+    // Every preamble after the first finds the last burst's points still there.
+    assert!(heard_with_points.len() >= 3, "{heard_with_points:?}");
+    for (modulation, points) in &heard_with_points[1..] {
+        assert!(*points > 0, "a {} preamble found the display empty: {heard_with_points:?}", modulation.label());
+    }
+    // And a new modulation starts it afresh, with only its own points.
+    assert_eq!(rx.modulation(), Some(modem::Modulation::Psk8));
+    let turned: Vec<f64> = rx.points().iter().map(|z| (z.arg() / (std::f64::consts::TAU / 8.0)).round()).collect();
+    assert!(turned.iter().any(|k| k.rem_euclid(2.0) == 1.0), "no 8PSK points among {} shown", turned.len());
+}
+
+#[test]
 fn a_receiver_that_tunes_in_late_joins_at_the_next_burst() {
     let mode = VoiceMode::robust(Profile::Wide);
     let sent = frames(mode, (30.0 / mode.codec.frame_seconds()) as usize, 9);
